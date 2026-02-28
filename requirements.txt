@@ -1,0 +1,8 @@
+customtkinter
+librosa
+numpy
+ruamel.yaml
+matplotlib
+pyworld
+soundfile
+pydub
