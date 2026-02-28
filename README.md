@@ -7,6 +7,12 @@ Python GUI toolkit for passing down Resampler arguments (single and batch resamp
 - [ ] Control output speed
 - [ ] Use wine for resamplers (for mac and linux)
 - [ ] Switch to pure python based FFpmeg and FFprobe (so mac and linux can use them too)
+- [ ] Use custom fonts
+- [x] Multi-threaded resampling
+- [x] Generate frq files with Harvest
+- [x] Accept any type of audio files
+- [ ] Convert to wav (temp file) before sending it to the resampler
+- [x] fader2.exe support
 ---
 ## How to use:
 Install necessary modules in order for the GUI script to run.
