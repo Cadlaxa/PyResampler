@@ -14,3 +14,5 @@ Install necessary modules in order for the GUI script to run.
 pip install -r requirements.txt
 ```
 The GUI will save the resampler and output directory in the config.yaml file.
+---
+<img width="602" height="632" alt="image" src="https://github.com/user-attachments/assets/4beee8c0-6a23-4dd2-a6d2-5dce77b18489" />
