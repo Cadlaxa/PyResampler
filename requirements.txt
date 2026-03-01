@@ -6,3 +6,4 @@ matplotlib
 pyworld
 soundfile
 pydub
+requests

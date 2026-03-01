@@ -11,7 +11,7 @@ Python GUI toolkit for passing down Resampler arguments (single and batch resamp
 - [x] Multi-threaded resampling
 - [x] Generate frq files with Harvest
 - [x] Accept any type of audio files
-- [ ] Convert to wav (temp file) before sending it to the resampler
+- [x] Convert to wav (temp file) before sending it to the resampler
 - [x] fader2.exe support
 ---
 ## How to use:

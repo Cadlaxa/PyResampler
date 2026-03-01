@@ -5,11 +5,13 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
-from ruamel.yaml import YAML
+from ruamel.yaml import YAML, version
 import librosa
 import numpy as np
 import tempfile
 import wave
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import librosa.display
 import pyworld as world
@@ -17,6 +19,9 @@ import soundfile as sf
 import struct
 import customtkinter as ctk
 import platform
+import webbrowser
+import requests
+import shutil
 
 base_path = os.path.dirname(os.path.abspath(__file__))
 ffmpeg_folder = os.path.join(base_path, "ffmpeg")
@@ -35,13 +40,14 @@ ctk.set_default_color_theme("blue")
 class UTAUResamplerGUI(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("Batch Resampler GUI")
-        
+
+        self.title("PyResampler - Batch Resampling GUI")
         self.config_path = "config.yaml"
         self.config = self.load_config()
         self.audio_files = []
         self.batch_checkboxes = {}
-        self.geometry("600x600")
+        self.geometry("700x600")
+        self.specific_temp_dir = os.path.join(base_path, "cache_temp")
 
         # Variables 
         self.resampler_dir_var = ctk.StringVar(value=self.config.get("resampler_directory", ""))
@@ -51,10 +57,49 @@ class UTAUResamplerGUI(ctk.CTk):
         self.flags_var = ctk.StringVar(value="")
         self.pitch_note_var = ctk.StringVar(value="C4")
         self.volume_var = ctk.StringVar(value="100")
-        self.modulation_var = ctk.StringVar(value="0")
+        self.modulation_var = ctk.StringVar(value="100")
         self.threads_var = ctk.StringVar(value="4")
 
         self.setup_ui()
+        self.check_for_updates()
+    
+    def clear_cache(self):
+        temp_dir = self.specific_temp_dir
+        
+        if not os.path.exists(temp_dir):
+            messagebox.showinfo("Info", "No temp folder found.")
+            return
+        confirm = messagebox.askyesno("Confirm", "Are you sure you want to delete ALL files in the temp folder?")
+        
+        if confirm:
+            try:
+                shutil.rmtree(temp_dir)
+                os.makedirs(temp_dir)
+                messagebox.showinfo("Success", "Temp folder cleared successfully.")
+            except Exception as e:
+                messagebox.showerror("Error", f"Could not clear temp folder: {e}")
+    
+    def check_for_updates(self):
+        url = "https://raw.githubusercontent.com/Cadlaxa/PyResampler/version.txt"
+        
+        try:
+            response = requests.get(url, timeout=5)
+            if response.status_code == 200:
+                latest_version = response.text.strip()
+                
+                if latest_version != self.version:
+                    user_choice = messagebox.askyesno(
+                        "Update Available", 
+                        f"A new version ({latest_version}) is available!\n"
+                        "Would you like to go to the GitHub page to download/pull the latest code?"
+                    )
+                    if user_choice:
+                        webbrowser.open("https://github.com/Cadlaxa/PyResampler")
+            else:
+                print("Could not reach GitHub to check for updates.")
+                
+        except Exception as e:
+            print(f"Update check failed: {e}")
 
     def load_config(self):
         if os.path.exists(self.config_path):
@@ -66,8 +111,15 @@ class UTAUResamplerGUI(ctk.CTk):
 
     def update_config_file(self, key, value):
         self.config[key] = value
-        with open(self.config_path, 'w') as f:
-            yaml.dump(self.config, f)
+        try:
+            with open(self.config_path, 'w') as f:
+                yaml.dump(self.config, f)
+        except PermissionError:
+            print("\033[91m[ERROR] Could not save config.yaml. Is it open in another program?\033[0m")
+    
+    def update_speed_label(self, value):
+        rounded_val = round(float(value), 1)
+        self.speed_var.set(rounded_val)
 
     def setup_ui(self):
         self.main_container = ctk.CTkScrollableFrame(self, fg_color="transparent")
@@ -85,7 +137,7 @@ class UTAUResamplerGUI(ctk.CTk):
         self.audio_textbox.configure(state="disabled")
 
         btn_frame = ctk.CTkFrame(self.top_frame, fg_color="transparent")
-        btn_frame.grid(row=0, column=2, padx=10, sticky="n") # Sticky "n" keeps it at the top
+        btn_frame.grid(row=0, column=2, padx=10, sticky="n")
         ctk.CTkButton(btn_frame, text="Add Files", width=120, command=self.add_audio_files).pack(pady=5)
         ctk.CTkButton(btn_frame, text="Clear", width=120, fg_color="transparent", border_width=1, command=self.clear_audio_files).pack(pady=5)
         ctk.CTkLabel(self.top_frame, text="Resampler Dir:").grid(row=1, column=0, padx=10, pady=5, sticky="w")
@@ -118,28 +170,59 @@ class UTAUResamplerGUI(ctk.CTk):
 
         # Title: Center aligned across all columns
         ctk.CTkLabel(self.param_frame, text="Processing Parameters", font=("Arial", 14, "bold")).grid(
-            row=0, column=0, columnspan=4, pady=10, sticky="ew"
+            row=0, column=0, columnspan=7, pady=10, sticky="ew"
         )
+
+        for i in range(7):
+            self.param_frame.grid_columnconfigure(i, weight=1)
 
         # Row 1: Flags and Threads
         ctk.CTkLabel(self.param_frame, text="Flags:").grid(row=1, column=0, padx=5, pady=5, sticky="e")
         ctk.CTkEntry(self.param_frame, textvariable=self.flags_var, width=140).grid(row=1, column=1, padx=5, pady=5, sticky="w")
 
         ctk.CTkLabel(self.param_frame, text="Threads:").grid(row=1, column=2, padx=5, pady=5, sticky="e")
-        ctk.CTkEntry(self.param_frame, textvariable=self.threads_var, width=60).grid(row=1, column=3, padx=5, pady=5, sticky="w")
+        ctk.CTkEntry(self.param_frame, textvariable=self.threads_var, width=140).grid(row=1, column=3, padx=5, pady=5, sticky="w")
 
-        # Row 2: Pitch and Follow Pitch
+        # Add this in your UI initialization section
+        self.clear_cache_btn = ctk.CTkButton(
+            self.param_frame, 
+            text="Clear Temp Cache", 
+            command=self.clear_cache,
+            fg_color="#a11d33",
+            hover_color="#7a1224",
+            width=140
+        )
+        # Adjust the row/column to fit your current layout
+        self.clear_cache_btn.grid(row=1, column=5, padx=10, pady=20, sticky="we")
+
+        # Row 2: Pitch, Follow Pitch, Speed
         ctk.CTkLabel(self.param_frame, text="Pitch:").grid(row=2, column=0, padx=5, pady=5, sticky="e")
         self.pitch_entry = ctk.CTkEntry(self.param_frame, textvariable=self.pitch_note_var, width=140)
         self.pitch_entry.grid(row=2, column=1, padx=5, pady=5, sticky="w")
 
+        self.speed_var = ctk.DoubleVar(value=0.0)
+        ctk.CTkLabel(self.param_frame, text="Speed:").grid(row=2, column=2, padx=5, pady=5, sticky="e")
+        self.speed_slider = ctk.CTkSlider(
+            self.param_frame, 
+            from_=-5, 
+            to=5, 
+            number_of_steps=100,
+            variable=self.speed_var, 
+            command=self.update_speed_label,
+            width=100
+        )
+        self.speed_slider.grid(row=2, column=3, padx=5, pady=5, sticky="ew")
+
+        self.speed_value_label = ctk.CTkLabel(self.param_frame, textvariable=self.speed_var)
+        self.speed_value_label.grid(row=2, column=4, padx=5, pady=5, sticky="w")
+
         self.follow_pitch_var = ctk.BooleanVar(value=False)
         ctk.CTkCheckBox(self.param_frame, text="Follow Input Pitch", variable=self.follow_pitch_var, command=self.toggle_pitch_entry).grid(
-            row=2, column=2, columnspan=2, padx=5, pady=5, sticky="w"
+            row=2, column=5, columnspan=2, padx=5, pady=5, sticky="w"
         )
 
-        # Row 3: Volume and Modulation
-        ctk.CTkLabel(self.param_frame, text="Volume:").grid(row=3, column=0, padx=5, pady=5, sticky="e")
+        # Row 3: Volume, Modulation
+        ctk.CTkLabel(self.param_frame, text="Vol:").grid(row=3, column=0, padx=5, pady=5, sticky="e")
         ctk.CTkEntry(self.param_frame, textvariable=self.volume_var, width=140).grid(row=3, column=1, padx=5, pady=5, sticky="w")
 
         ctk.CTkLabel(self.param_frame, text="Modulation:").grid(row=3, column=2, padx=5, pady=5, sticky="e")
@@ -150,9 +233,9 @@ class UTAUResamplerGUI(ctk.CTk):
         self.generate_frq_var = ctk.BooleanVar(value=False)
         self.only_frq_var = ctk.BooleanVar(value=False)
 
-        ctk.CTkCheckBox(self.param_frame, text="Spectrograms", variable=self.gen_spec_var).grid(row=4, column=1, pady=10, sticky="w")
-        ctk.CTkCheckBox(self.param_frame, text="Harvest .frq", variable=self.generate_frq_var).grid(row=4, column=2, pady=10, sticky="w")
-        ctk.CTkCheckBox(self.param_frame, text="Only .frq", variable=self.only_frq_var).grid(row=4, column=3, pady=10, sticky="w")
+        ctk.CTkCheckBox(self.param_frame, text="Spectrograms", variable=self.gen_spec_var).grid(row=4, column=1, pady=10, sticky="we")
+        ctk.CTkCheckBox(self.param_frame, text="Harvest .frq", variable=self.generate_frq_var).grid(row=4, column=3, pady=10, sticky="we")
+        ctk.CTkCheckBox(self.param_frame, text="Only .frq", variable=self.only_frq_var).grid(row=4, column=5, pady=10, sticky="we")
 
         # Output Section
         self.out_f = ctk.CTkFrame(self.main_container)
@@ -189,8 +272,22 @@ class UTAUResamplerGUI(ctk.CTk):
             self.update_config_file("output_directory", d)
 
     def toggle_pitch_entry(self):
-        state = "disabled" if self.follow_pitch_var.get() else "normal"
-        self.pitch_entry.configure(state=state)
+        if self.follow_pitch_var.get():
+            # DISABLED STATE
+            self.pitch_entry.configure(
+                state="disabled", 
+                text_color="gray",
+                fg_color="#333333"
+            )
+            self.pitch_note_var.set("Auto detects pitch")
+        else:
+            # NORMAL STATE
+            self.pitch_entry.configure(
+                state="normal", 
+                text_color="white",
+                fg_color="#3b3b3b"
+            )
+            self.pitch_note_var.set("C4")
 
     def get_resamplers(self):
         base_dir = self.resampler_dir_var.get()
@@ -263,15 +360,19 @@ class UTAUResamplerGUI(ctk.CTk):
 
     def save_spectrogram(self, audio_path):
         try:
-            plt.figure(figsize=(10, 4))
+            fig = plt.figure(figsize=(10, 4))
             y, sr = librosa.load(audio_path, sr=None)
             S = librosa.feature.melspectrogram(y=y, sr=sr, n_mels=128)
-            librosa.display.specshow(librosa.power_to_db(S, ref=np.max), sr=sr, x_axis='time', y_axis='mel')
-            plt.title(f"Spectrogram: {os.path.basename(audio_path)}")
-            plt.tight_layout()
-            plt.savefig(os.path.splitext(audio_path)[0] + "_spec.png")
-            plt.close()
-        except: pass
+            ax = fig.add_subplot(111)
+            librosa.display.specshow(librosa.power_to_db(S, ref=np.max), 
+                                    sr=sr, x_axis='time', y_axis='mel', ax=ax)
+            ax.set_title(f"Spectrogram: {os.path.basename(audio_path)}")
+            fig.tight_layout()
+            output_path = os.path.splitext(audio_path)[0] + "_spec.png"
+            fig.savefig(output_path)
+            plt.close(fig) 
+        except Exception as e:
+            print(f"Spectrogram Error: {e}")
 
     def generate_harvest_frq(self, input_wav, target_out=None):
         try:
@@ -325,8 +426,7 @@ class UTAUResamplerGUI(ctk.CTk):
 
         temp_map = {} # Original Path -> Normalized Temp Path
         pitch_map = {}
-        specific_temp_dir = os.path.join(base_path, "cache_temp")
-        os.makedirs(specific_temp_dir, exist_ok=True)
+        os.makedirs(self.specific_temp_dir, exist_ok=True)
 
         # STAGE 1: Normalization & Global FRQ (Run once per file)
         print(f"\n{BLUE}{BOLD}=== STAGE 1: PRE-PROCESSING AUDIO ==={RESET}")
@@ -352,7 +452,7 @@ class UTAUResamplerGUI(ctk.CTk):
                     
                     print(f"  {YELLOW}>> Normalizing: {', '.join(reasons)}...{RESET}")
                     
-                    t_file = tempfile.NamedTemporaryFile(suffix=".wav", dir=specific_temp_dir, delete=False)
+                    t_file = tempfile.NamedTemporaryFile(suffix=".wav", dir=self.specific_temp_dir, delete=False)
                     normalized_path = t_file.name
                     t_file.close()
                     
@@ -431,9 +531,26 @@ class UTAUResamplerGUI(ctk.CTk):
         YELLOW, GREEN, RED, CYAN, RESET, BOLD = "\033[93m", "\033[92m", "\033[91m", "\033[96m", "\033[0m", "\033[1m"
         
         try:
+            speed_val = self.speed_var.get()
+            if abs(speed_val) < 0.01:
+                multiplier = 1.0
+                velocity_num = 100
+            else:
+                if speed_val > 0:
+                    multiplier = 1.0 + (speed_val / 5.0)
+                    velocity_num = 100 + (speed_val * 20)
+                else:
+                    multiplier = 1.0 / (1.0 + abs(speed_val) / 5.0)
+                    velocity_num = 100 + (speed_val * 20) 
+
+            velocity = str(max(0, int(velocity_num)))
+
             with wave.open(t["audio_in"], 'r') as f:
-                raw_len = int((f.getnframes() / float(f.getframerate())) * 1000)
-                length, cons = str(max(0, raw_len)), str(max(0, raw_len - 100))
+                raw_duration = (f.getnframes() / float(f.getframerate())) * 1000
+                adjusted_len = int(round(raw_duration / multiplier))
+                length = str(max(1, adjusted_len))
+                cons = str(max(1, adjusted_len) + 25)
+                cuttoff = str(-int(length))
 
             # arguements
             if "fader2" in os.path.basename(t["res_exe"]).lower():
@@ -454,12 +571,12 @@ class UTAUResamplerGUI(ctk.CTk):
                     t["audio_in"], 
                     t["audio_out"], 
                     t["pitch"], 
-                    "100", 
+                    velocity, 
                     self.flags_var.get() or "", 
                     "0", 
                     length, 
                     cons, 
-                    "0", 
+                    cuttoff, 
                     self.volume_var.get(), 
                     self.modulation_var.get(), 
                     "!120", 
@@ -470,7 +587,7 @@ class UTAUResamplerGUI(ctk.CTk):
             print(f"{BOLD}Command Arguments:{RESET}")
             for i, arg in enumerate(cmd):
                 print(f"  {CYAN}[{i}]{RESET} {arg}")
-            result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+            result = subprocess.run(cmd, timeout=8.0, check=True, capture_output=True, text=True)
             
             if result.stdout.strip():
                 print(f"{BOLD}Output:{RESET} {result.stdout.strip()}")
@@ -479,6 +596,11 @@ class UTAUResamplerGUI(ctk.CTk):
             
             if self.gen_spec_var.get(): 
                 self.save_spectrogram(t["audio_out"])
+        
+        except subprocess.TimeoutExpired:
+            print(f"Skipped (Timeout): {os.path.basename(t['audio_in'])} took too long.")
+            if os.path.exists(t["audio_out"]):
+                os.remove(t["audio_out"])
                 
         except subprocess.CalledProcessError as e:
             print(f"{RED}[FAILED] Resampler returned error code {e.returncode}{RESET}")

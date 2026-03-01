@@ -211,3 +211,4 @@ input/
 resamplers/
 cache_temp/
 output/
+config.yaml
