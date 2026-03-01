@@ -495,7 +495,7 @@ class UTAUResamplerGUI(ctk.CTk):
         mode = self.tabview.get()
         res_dir = self.resampler_dir_var.get()
         resamplers = []
-        if mode == "Single Resample":
+        if mode == "Single Resampler":
             if self.resampler_var.get(): resamplers.append(os.path.join(res_dir, self.resampler_var.get()))
         else:
             for name, var in self.batch_checkboxes.items():
@@ -505,7 +505,7 @@ class UTAUResamplerGUI(ctk.CTk):
             self.after(0, lambda: self.start_btn.configure(state="normal", text="START RESAMPLING"))
             return
 
-        temp_map = {} # Original Path -> Normalized Temp Path
+        temp_map = {}
         pitch_map = {}
         os.makedirs(self.specific_temp_dir, exist_ok=True)
 
