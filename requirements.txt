@@ -7,3 +7,5 @@ pyworld
 soundfile
 pydub
 requests
+tkinterdnd2
+pyglet

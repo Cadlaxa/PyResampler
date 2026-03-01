@@ -1,30 +1,22 @@
-import os
-import sys
-import subprocess
-import threading
+import os, sys, subprocess, threading
 from concurrent.futures import ThreadPoolExecutor
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from ruamel.yaml import YAML, version
-import librosa
+import librosa, tempfile, wave, matplotlib
 import numpy as np
-import tempfile
-import wave
-import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import librosa.display
 import pyworld as world
 import soundfile as sf
-import struct
 import customtkinter as ctk
-import platform
-import webbrowser
-import requests
-import shutil
+import struct, platform, webbrowser, requests, shutil, re, pyglet, ctypes
+from tkinterdnd2 import DND_FILES, TkinterDnD
+from pathlib import Path as P
 
 base_path = os.path.dirname(os.path.abspath(__file__))
-ffmpeg_folder = os.path.join(base_path, "ffmpeg")
+ffmpeg_folder = os.path.join(base_path, "Ffmpeg")
 
 os.environ["PATH"] = ffmpeg_folder + os.pathsep + os.environ["PATH"]
 from pydub import AudioSegment
@@ -35,20 +27,27 @@ yaml = YAML()
 yaml.preserve_quotes = True
 
 ctk.set_appearance_mode("Dark")
-ctk.set_default_color_theme("blue")
+ctk.set_default_color_theme("Assets/Theme/orange.json")
+
+ASSETS = P('./Assets')
+FONTS = P(ASSETS, 'Fonts')
 
 class UTAUResamplerGUI(ctk.CTk):
     def __init__(self):
         super().__init__()
+        self.TkdndVersion = TkinterDnD._require(self)
+        icon_path = P(__file__).parent / "Assets" / "icon.ico"
+        # Set the icon
+        self.iconbitmap(str(icon_path))
 
         self.title("PyResampler - Batch Resampling GUI")
-        self.version = "0.0.2"
+        self.version = "0.0.3"
         self.config_path = "config.yaml"
         self.config = self.load_config()
         self.audio_files = []
         self.batch_checkboxes = {}
         self.geometry("700x600")
-        self.specific_temp_dir = os.path.join(base_path, "cache_temp")
+        self.specific_temp_dir = os.path.join(base_path, "Cache_temp")
         print(f"PyResampler Verion: {self.version}")
 
         # Variables 
@@ -91,7 +90,7 @@ class UTAUResamplerGUI(ctk.CTk):
                 latest_version = raw_text.replace("version:", "").strip()
                 
                 current_version = str(self.version).strip()
-                if latest_version != current_version:
+                if latest_version > current_version:
                     user_choice = messagebox.askyesno(
                         "Update Available", 
                         f"A new version ({latest_version}) is available!\n\n"
@@ -101,10 +100,9 @@ class UTAUResamplerGUI(ctk.CTk):
                     if user_choice:
                         webbrowser.open("https://github.com/Cadlaxa/PyResampler")
                 else:
-                    print("App is up to date.")
+                    print("Script is up to date.")
                 
         except Exception as e:
-            # Silently fail or log to console so it doesn't annoy the user
             print(f"Update check failed: {e}")
 
     def load_config(self):
@@ -126,45 +124,89 @@ class UTAUResamplerGUI(ctk.CTk):
     def update_speed_label(self, value):
         rounded_val = round(float(value), 1)
         self.speed_var.set(rounded_val)
+    
+    def load_fonts(self):
+        font_files = [
+            'Montserrat-Black.ttf', 
+            'Montserrat-Bold.ttf', 
+            'Montserrat-ExtraBold.ttf',
+            'Montserrat-Medium.ttf',  
+            'Liberisco.ttf'
+        ]
+        
+        current_os = platform.system()
+
+        for f_name in font_files:
+            font_path = FONTS / f_name
+            
+            if current_os == "Windows":
+                ctypes.windll.gdi32.AddFontResourceExW(str(font_path), 0x10, 0)
+                
+            elif current_os == "Darwin":
+                pyglet.font.add_file(str(font_path))
+                
+            elif current_os == "Linux":
+                pyglet.font.add_file(str(font_path))
 
     def setup_ui(self):
+        # Load fonts
+        self.load_fonts()
+
+        self.fontME = ctk.CTkFont(family="Montserrat Medium", size=12)
+        self.fontBL = ctk.CTkFont(family="Montserrat Black", size=12)
+        self.fontEB = ctk.CTkFont(family="Montserrat ExtraBold", size=12)
+        self.fontBO = ctk.CTkFont(family="Montserrat Bold", size=12)
+
+        self.resample = ctk.CTkFont(family="Montserrat Black", size=20)
+        self.title = ctk.CTkFont(family="Montserrat Black", size=18)
+        self.header = ctk.CTkFont(family="Liberisco PERSONAL USE ONLY!", size=50)
+
+
         self.main_container = ctk.CTkScrollableFrame(self, fg_color="transparent")
         self.main_container.pack(fill="both", expand=True, padx=5, pady=5)
 
+        self.main_container1 = ctk.CTkFrame(self, fg_color="transparent")
+        self.main_container1.pack(fill="x", expand=False, padx=5, pady=(0, 5))
+
+        ctk.CTkLabel(self.main_container, text="PyResampler", font=self.header, text_color=["#FF8C42", "#FF6505"]).pack(pady=(5,0))
+        ctk.CTkLabel(self.main_container, text=f"@cadlaxa  |  ver: {self.version}", font=self.fontME).pack(pady=(0,5))
+
         # File Selection Section
         self.top_frame = ctk.CTkFrame(self.main_container)
-        self.top_frame.pack(fill="x", padx=10, pady=5)
+        self.top_frame.pack(fill="x", padx=10, pady=(5, 0))
         self.top_frame.grid_columnconfigure(1, weight=1) 
 
-        ctk.CTkLabel(self.top_frame, text="Audio Files:").grid(row=0, column=0, padx=10, pady=10, sticky="nw")
+        ctk.CTkLabel(self.top_frame, text="Audio Files:", font=self.fontBO).grid(row=0, column=0, padx=10, pady=10, sticky="nw")
 
-        self.audio_textbox = ctk.CTkTextbox(self.top_frame, height=100)
-        self.audio_textbox.grid(row=0, column=1, padx=10, pady=5, sticky="ew")
+        self.audio_textbox = ctk.CTkTextbox(self.top_frame, height=100, font=self.fontME)
+        self.audio_textbox.grid(row=0, column=1, padx=10, pady=(10,5), sticky="ew")
         self.audio_textbox.configure(state="disabled")
+        self.audio_textbox.drop_target_register(DND_FILES)
+        self.audio_textbox.dnd_bind('<<Drop>>', self.handle_drop)
 
         btn_frame = ctk.CTkFrame(self.top_frame, fg_color="transparent")
-        btn_frame.grid(row=0, column=2, padx=10, sticky="n")
-        ctk.CTkButton(btn_frame, text="Add Files", width=120, command=self.add_audio_files).pack(pady=5)
-        ctk.CTkButton(btn_frame, text="Clear", width=120, fg_color="transparent", border_width=1, command=self.clear_audio_files).pack(pady=5)
-        ctk.CTkLabel(self.top_frame, text="Resampler Dir:").grid(row=1, column=0, padx=10, pady=5, sticky="w")
+        btn_frame.grid(row=0, column=2, padx=10, pady=10, sticky="n")
+        ctk.CTkButton(btn_frame, text="Add Files", width=120, font=self.fontBO, command=self.add_audio_files).pack()
+        ctk.CTkButton(btn_frame, text="Clear", width=120, font=self.fontBO, fg_color="transparent", border_width=1, command=self.clear_audio_files).pack(pady=5)
+        ctk.CTkLabel(self.top_frame, text="Resampler Dir:", font=self.fontBO).grid(row=1, column=0, padx=10, pady=5, sticky="w")
 
-        self.resampler_entry = ctk.CTkEntry(self.top_frame, textvariable=self.resampler_dir_var)
+        self.resampler_entry = ctk.CTkEntry(self.top_frame, font=self.fontME, textvariable=self.resampler_dir_var)
         self.resampler_entry.grid(row=1, column=1, padx=10, pady=5, sticky="ew")
-        ctk.CTkButton(self.top_frame, text="Browse", width=120, command=self.select_resampler_dir).grid(row=1, column=2, padx=10, pady=5)
+        ctk.CTkButton(self.top_frame, text="Browse", font=self.fontBO, width=120, command=self.select_resampler_dir).grid(row=1, column=2, padx=10, pady=(5,10))
         
         # Tabs Section
         self.tabview = ctk.CTkTabview(self.main_container)
         self.tabview.pack(fill="x", padx=10, pady=5)
-        self.single_tab = self.tabview.add("Single Resample")
+        self.single_tab = self.tabview.add("Single Resampler")
         self.batch_tab = self.tabview.add("Batch Resamplers")
 
         # Single UI
-        ctk.CTkLabel(self.single_tab, text="Select Resampler:").pack(pady=5)
-        self.resampler_combo = ctk.CTkComboBox(self.single_tab, variable=self.resampler_var, values=self.get_resamplers(), width=400, command=self.save_resampler_config)
+        ctk.CTkLabel(self.single_tab, text="Select Resampler:", font=self.title).pack(pady=5)
+        self.resampler_combo = ctk.CTkComboBox(self.single_tab, font=self.fontME ,variable=self.resampler_var, values=self.get_resamplers(), width=400, command=self.save_resampler_config)
         self.resampler_combo.pack(pady=5)
 
         # Batch UI
-        ctk.CTkLabel(self.batch_tab, text="Select Multiple Resamplers:").pack(pady=5)
+        ctk.CTkLabel(self.batch_tab, text="Select Multiple Resamplers:", font=self.title).pack(pady=5)
         self.batch_scroll = ctk.CTkScrollableFrame(self.batch_tab, height=100)
         self.batch_scroll.pack(fill="both", expand=True, padx=5, pady=5)
         self.refresh_batch_resamplers()
@@ -175,7 +217,7 @@ class UTAUResamplerGUI(ctk.CTk):
         self.param_frame.grid_columnconfigure((0, 1, 2, 3), weight=1)
 
         # Title: Center aligned across all columns
-        ctk.CTkLabel(self.param_frame, text="Processing Parameters", font=("Arial", 14, "bold")).grid(
+        ctk.CTkLabel(self.param_frame, text="Processing Parameters", font=self.title).grid(
             row=0, column=0, columnspan=7, pady=10, sticky="ew"
         )
 
@@ -183,31 +225,30 @@ class UTAUResamplerGUI(ctk.CTk):
             self.param_frame.grid_columnconfigure(i, weight=1)
 
         # Row 1: Flags and Threads
-        ctk.CTkLabel(self.param_frame, text="Flags:").grid(row=1, column=0, padx=5, pady=5, sticky="e")
+        ctk.CTkLabel(self.param_frame, text="Flags:", font=self.fontBO).grid(row=1, column=0, padx=5, pady=5, sticky="e")
         ctk.CTkEntry(self.param_frame, textvariable=self.flags_var, width=140).grid(row=1, column=1, padx=5, pady=5, sticky="w")
 
-        ctk.CTkLabel(self.param_frame, text="Threads:").grid(row=1, column=2, padx=5, pady=5, sticky="e")
+        ctk.CTkLabel(self.param_frame, text="Threads:", font=self.fontBO).grid(row=1, column=2, padx=5, pady=5, sticky="e")
         ctk.CTkEntry(self.param_frame, textvariable=self.threads_var, width=140).grid(row=1, column=3, padx=5, pady=5, sticky="w")
 
         # Add this in your UI initialization section
         self.clear_cache_btn = ctk.CTkButton(
             self.param_frame, 
             text="Clear Temp Cache", 
+            font=self.fontBO,
             command=self.clear_cache,
-            fg_color="#a11d33",
-            hover_color="#7a1224",
             width=140
         )
         # Adjust the row/column to fit your current layout
-        self.clear_cache_btn.grid(row=1, column=5, padx=10, pady=20, sticky="we")
+        self.clear_cache_btn.grid(row=1, column=5, padx=5, pady=5, sticky="we")
 
         # Row 2: Pitch, Follow Pitch, Speed
-        ctk.CTkLabel(self.param_frame, text="Pitch:").grid(row=2, column=0, padx=5, pady=5, sticky="e")
+        ctk.CTkLabel(self.param_frame, text="Pitch:", font=self.fontBO).grid(row=2, column=0, padx=5, pady=5, sticky="e")
         self.pitch_entry = ctk.CTkEntry(self.param_frame, textvariable=self.pitch_note_var, width=140)
         self.pitch_entry.grid(row=2, column=1, padx=5, pady=5, sticky="w")
 
         self.speed_var = ctk.DoubleVar(value=0.0)
-        ctk.CTkLabel(self.param_frame, text="Speed:").grid(row=2, column=2, padx=5, pady=5, sticky="e")
+        ctk.CTkLabel(self.param_frame, text="Speed:", font=self.fontBO).grid(row=2, column=2, padx=5, pady=5, sticky="e")
         self.speed_slider = ctk.CTkSlider(
             self.param_frame, 
             from_=-5, 
@@ -219,19 +260,19 @@ class UTAUResamplerGUI(ctk.CTk):
         )
         self.speed_slider.grid(row=2, column=3, padx=5, pady=5, sticky="ew")
 
-        self.speed_value_label = ctk.CTkLabel(self.param_frame, textvariable=self.speed_var)
+        self.speed_value_label = ctk.CTkLabel(self.param_frame, textvariable=self.speed_var, font=self.fontBO)
         self.speed_value_label.grid(row=2, column=4, padx=5, pady=5, sticky="w")
 
         self.follow_pitch_var = ctk.BooleanVar(value=False)
-        ctk.CTkCheckBox(self.param_frame, text="Follow Input Pitch", variable=self.follow_pitch_var, command=self.toggle_pitch_entry).grid(
+        ctk.CTkCheckBox(self.param_frame, text="Follow Input Pitch", font=self.fontBO, variable=self.follow_pitch_var, command=self.toggle_pitch_entry).grid(
             row=2, column=5, columnspan=2, padx=5, pady=5, sticky="w"
         )
 
         # Row 3: Volume, Modulation
-        ctk.CTkLabel(self.param_frame, text="Vol:").grid(row=3, column=0, padx=5, pady=5, sticky="e")
+        ctk.CTkLabel(self.param_frame, text="Vol:", font=self.fontBO).grid(row=3, column=0, padx=5, pady=5, sticky="e")
         ctk.CTkEntry(self.param_frame, textvariable=self.volume_var, width=140).grid(row=3, column=1, padx=5, pady=5, sticky="w")
 
-        ctk.CTkLabel(self.param_frame, text="Modulation:").grid(row=3, column=2, padx=5, pady=5, sticky="e")
+        ctk.CTkLabel(self.param_frame, text="Modulation:", font=self.fontBO).grid(row=3, column=2, padx=5, pady=5, sticky="e")
         ctk.CTkEntry(self.param_frame, textvariable=self.modulation_var, width=140).grid(row=3, column=3, padx=5, pady=5, sticky="w")
 
         # Row 4: Extra Options (Checkboxes)
@@ -239,25 +280,25 @@ class UTAUResamplerGUI(ctk.CTk):
         self.generate_frq_var = ctk.BooleanVar(value=False)
         self.only_frq_var = ctk.BooleanVar(value=False)
 
-        ctk.CTkCheckBox(self.param_frame, text="Spectrograms", variable=self.gen_spec_var).grid(row=4, column=1, pady=10, sticky="we")
-        ctk.CTkCheckBox(self.param_frame, text="Harvest .frq", variable=self.generate_frq_var).grid(row=4, column=3, pady=10, sticky="we")
-        ctk.CTkCheckBox(self.param_frame, text="Only .frq", variable=self.only_frq_var).grid(row=4, column=5, pady=10, sticky="we")
+        ctk.CTkCheckBox(self.param_frame, text="Spectrograms", font=self.fontBO, variable=self.gen_spec_var).grid(row=4, column=1, pady=10, sticky="we")
+        ctk.CTkCheckBox(self.param_frame, text="Harvest .frq", font=self.fontBO, variable=self.generate_frq_var).grid(row=4, column=3, pady=10, sticky="we")
+        ctk.CTkCheckBox(self.param_frame, text="Only .frq", font=self.fontBO, variable=self.only_frq_var).grid(row=4, column=5, pady=10, sticky="we")
 
         # Output Section
         self.out_f = ctk.CTkFrame(self.main_container)
         self.out_f.pack(fill="x", padx=10, pady=5)
         self.out_f.grid_columnconfigure(1, weight=1)
-        ctk.CTkLabel(self.out_f, text="Output Dir:").grid(row=0, column=0, padx=10, pady=10, sticky="w")
+        ctk.CTkLabel(self.out_f, text="Output Dir:", font=self.fontBO).grid(row=0, column=0, padx=10, pady=10, sticky="w")
         self.output_entry = ctk.CTkEntry(self.out_f, textvariable=self.output_dir_var)
         self.output_entry.grid(row=0, column=1, padx=5, pady=10, sticky="ew")
-        ctk.CTkButton(self.out_f, text="Browse", width=120, command=self.select_output_dir).grid(row=0, column=2, padx=10, pady=10)
+        ctk.CTkButton(self.out_f, text="Browse", font=self.fontBO, width=120, command=self.select_output_dir).grid(row=0, column=2, padx=10, pady=10)
 
-        self.progress_bar = ctk.CTkProgressBar(self.main_container)
-        self.progress_bar.pack(fill="x", padx=20, pady=10)
+        self.progress_bar = ctk.CTkProgressBar(self.main_container1)
+        self.progress_bar.pack(fill="x", padx=20, pady=(0, 10))
         self.progress_bar.set(0)
 
-        self.start_btn = ctk.CTkButton(self.main_container, text="START RESAMPLING", height=50, fg_color="#28a745", hover_color="#218838", font=("Arial", 16, "bold"), command=self.run_process_thread)
-        self.start_btn.pack(pady=20, padx=20, fill="x")
+        self.start_btn = ctk.CTkButton(self.main_container1, text="START RESAMPLING", font=self.resample, height=50, command=self.run_process_thread)
+        self.start_btn.pack(pady=(5, 20), padx=10, fill="x")
         
     # Logic
     def save_resampler_config(self, choice):
@@ -312,12 +353,24 @@ class UTAUResamplerGUI(ctk.CTk):
     def refresh_batch_resamplers(self):
         for widget in self.batch_scroll.winfo_children():
             widget.destroy()
+
+        self.batch_scroll.grid_columnconfigure(0, weight=1)
+        self.batch_scroll.grid_columnconfigure(1, weight=1)
+        resamplers = self.get_resamplers()
+        
         self.batch_checkboxes = {}
-        for r in self.get_resamplers():
-            var = ctk.BooleanVar()
-            cb = ctk.CTkCheckBox(self.batch_scroll, text=r, variable=var)
-            cb.pack(anchor="w", pady=2)
-            self.batch_checkboxes[r] = var
+        
+        for i, res in enumerate(resamplers):
+            row = i // 2 
+            col = i % 2
+
+            cb = ctk.CTkCheckBox(
+                self.batch_scroll, 
+                text=res,
+                font=self.fontME
+            )
+            cb.grid(row=row, column=col, padx=10, pady=5, sticky="w")
+            self.batch_checkboxes[res] = cb
 
     def add_audio_files(self):
         files = filedialog.askopenfilenames(filetypes=[("Audio Files", "*.wav *.mp3 *.flac *.ogg *.m4a")])
@@ -326,6 +379,28 @@ class UTAUResamplerGUI(ctk.CTk):
                 if f not in self.audio_files:
                     self.audio_files.append(f)
             self.update_audio_display()
+    
+    def handle_drop(self, event):
+        files = re.findall(r'\{(.*?)\}|(\S+)', event.data)
+        dropped_files = [f[0] or f[1] for f in files]
+        
+        valid_extensions = ('.wav', '.mp3', '.ogg', '.flac', '.m4a')
+        added_any = False
+
+        for file_path in dropped_files:
+            if file_path.lower().endswith(valid_extensions):
+                if file_path not in self.audio_files:
+                    self.audio_files.append(file_path)
+                    added_any = True
+                    print(f"File accepted: {file_path}")
+            else:
+                print(f"Skipped invalid file: {file_path}")
+
+        if added_any:
+            # Sync with your display function
+            self.update_audio_display()
+        else:
+            messagebox.showwarning("No Valid Files", "No supported audio files were found in your drop.")
 
     def clear_audio_files(self):
         self.audio_files = []
