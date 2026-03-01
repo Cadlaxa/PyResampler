@@ -42,12 +42,14 @@ class UTAUResamplerGUI(ctk.CTk):
         super().__init__()
 
         self.title("PyResampler - Batch Resampling GUI")
+        self.version = "0.0.2"
         self.config_path = "config.yaml"
         self.config = self.load_config()
         self.audio_files = []
         self.batch_checkboxes = {}
         self.geometry("700x600")
         self.specific_temp_dir = os.path.join(base_path, "cache_temp")
+        print(f"PyResampler Verion: {self.version}")
 
         # Variables 
         self.resampler_dir_var = ctk.StringVar(value=self.config.get("resampler_directory", ""))
@@ -80,25 +82,29 @@ class UTAUResamplerGUI(ctk.CTk):
                 messagebox.showerror("Error", f"Could not clear temp folder: {e}")
     
     def check_for_updates(self):
-        url = "https://raw.githubusercontent.com/Cadlaxa/PyResampler/version.txt"
+        url = "https://raw.githubusercontent.com/Cadlaxa/PyResampler/main/version.txt"
         
         try:
             response = requests.get(url, timeout=5)
             if response.status_code == 200:
                 latest_version = response.text.strip()
-                
+
                 if latest_version != self.version:
                     user_choice = messagebox.askyesno(
                         "Update Available", 
-                        f"A new version ({latest_version}) is available!\n"
-                        "Would you like to go to the GitHub page to download/pull the latest code?"
+                        f"A new version ({latest_version}) is available!\n\n"
+                        f"Current version: {self.version}\n"
+                        "Would you like to go to the GitHub page to download the update?"
                     )
                     if user_choice:
                         webbrowser.open("https://github.com/Cadlaxa/PyResampler")
+                else:
+                    print("App is up to date.")
             else:
-                print("Could not reach GitHub to check for updates.")
+                print(f"Update check failed. Status code: {response.status_code}")
                 
         except Exception as e:
+            # Silently fail or log to console so it doesn't annoy the user
             print(f"Update check failed: {e}")
 
     def load_config(self):
