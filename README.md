@@ -21,4 +21,4 @@ Python GUI toolkit for passing down Resampler arguments (single and batch resamp
     ```
 - The GUI will save the resampler and output directory in the config.yaml file.
 ---
-<img width="602" height="632" alt="image" src="https://github.com/user-attachments/assets/4beee8c0-6a23-4dd2-a6d2-5dce77b18489" />
+<img width="702" height="632" alt="image" src="https://github.com/user-attachments/assets/2ce09411-5a7c-4f8b-b02e-929d8dc5816f" />
