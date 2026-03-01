@@ -87,21 +87,21 @@ class UTAUResamplerGUI(ctk.CTk):
         try:
             response = requests.get(url, timeout=5)
             if response.status_code == 200:
-                latest_version = response.text.strip()
-
-                if latest_version != self.version:
+                raw_text = response.text.encode('utf-8').decode('utf-8-sig').strip()
+                latest_version = raw_text.replace("version:", "").strip()
+                
+                current_version = str(self.version).strip()
+                if latest_version != current_version:
                     user_choice = messagebox.askyesno(
                         "Update Available", 
                         f"A new version ({latest_version}) is available!\n\n"
-                        f"Current version: {self.version}\n"
+                        f"Current version: {current_version}\n"
                         "Would you like to go to the GitHub page to download the update?"
                     )
                     if user_choice:
                         webbrowser.open("https://github.com/Cadlaxa/PyResampler")
                 else:
                     print("App is up to date.")
-            else:
-                print(f"Update check failed. Status code: {response.status_code}")
                 
         except Exception as e:
             # Silently fail or log to console so it doesn't annoy the user

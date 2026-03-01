@@ -4,7 +4,7 @@ Python GUI toolkit for passing down Resampler arguments (single and batch resamp
 ---
 ## To do:
 - [ ] UI improvements
-- [ ] Control output speed
+- [x] Control output speed
 - [ ] Use wine for resamplers (for mac and linux)
 - [ ] Switch to pure python based FFpmeg and FFprobe (so mac and linux can use them too)
 - [ ] Use custom fonts
