@@ -14,6 +14,7 @@ import customtkinter as ctk
 import struct, platform, webbrowser, requests, shutil, re, pyglet, ctypes
 from tkinterdnd2 import DND_FILES, TkinterDnD
 from pathlib import Path as P
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 base_path = os.path.dirname(os.path.abspath(__file__))
 ffmpeg_folder = os.path.join(base_path, "Ffmpeg")
@@ -41,7 +42,7 @@ class UTAUResamplerGUI(ctk.CTk):
         self.iconbitmap(str(icon_path))
 
         self.title("PyResampler - Batch Resampling GUI")
-        self.version = "0.0.3"
+        self.version = "0.0.4"
         self.config_path = "config.yaml"
         self.config = self.load_config()
         self.audio_files = []
@@ -49,6 +50,7 @@ class UTAUResamplerGUI(ctk.CTk):
         self.geometry("700x600")
         self.specific_temp_dir = os.path.join(base_path, "Cache_temp")
         print(f"PyResampler Verion: {self.version}")
+        self.trim_data = {}
 
         # Variables 
         self.resampler_dir_var = ctk.StringVar(value=self.config.get("resampler_directory", ""))
@@ -147,6 +149,161 @@ class UTAUResamplerGUI(ctk.CTk):
                 
             elif current_os == "Linux":
                 pyglet.font.add_file(str(font_path))
+    
+    def speed_adjust(self, input_wav, speed_multiplier):
+        # vPhysically stretches audio in Cache_temp using FFmpeg
+        if abs(speed_multiplier - 1.0) < 0.01:
+            return input_wav 
+
+        t_file = tempfile.NamedTemporaryFile(suffix="_stretched.wav", dir=self.specific_temp_dir, delete=False)
+        output_wav = t_file.name
+        t_file.close()
+
+        # Chain atempo filters (FFmpeg limit is 0.5 to 2.0 per instance)
+        if speed_multiplier > 2.0:
+            passes = []
+            tmp = speed_multiplier
+            while tmp > 2.0:
+                passes.append("atempo=2.0")
+                tmp /= 2.0
+            passes.append(f"atempo={tmp}")
+            filter_str = ",".join(passes)
+        elif speed_multiplier < 0.5:
+            passes = []
+            tmp = speed_multiplier
+            while tmp < 0.5:
+                passes.append("atempo=0.5")
+                tmp /= 0.5
+            passes.append(f"atempo={tmp}")
+            filter_str = ",".join(passes)
+        else:
+            filter_str = f"atempo={speed_multiplier}"
+
+        cmd = ["ffmpeg", "-y", "-i", input_wav, "-filter:a", filter_str, "-vn", output_wav]
+        try:
+            subprocess.run(cmd, check=True, capture_output=True)
+            return output_wav
+        except Exception as e:
+            print(f"FFmpeg Speed Error: {e}")
+            return input_wav
+    
+    def load_selected_to_trimmer(self, event):
+        try:
+            index = self.audio_textbox.index(f"@{event.x},{event.y}")
+            line_number = int(index.split('.')[0]) - 1
+            
+            if 0 <= line_number < len(self.audio_files):
+                selected_file = self.audio_files[line_number]
+                self.tabview.set("Duration")
+                self.display_waveform(selected_file)
+            else:
+                print(f"Clicked line {line_number}, but only {len(self.audio_files)} files loaded.")
+        except Exception as e:
+            print(f"Selection failed: {e}")
+    
+    def display_waveform(self, file_path):
+        self.current_editing_path = file_path
+        
+        for widget in self.wave_container.winfo_children():
+            widget.destroy()
+        self.loading_lbl = ctk.CTkLabel(self.wave_container, text="Loading Waveform...", font=self.fontME)
+        self.loading_lbl.pack(expand=True)
+        threading.Thread(target=self._load_waveform_data, args=(file_path,), daemon=True).start()
+
+    def _load_waveform_data(self, file_path):
+        try:
+            y, sr = librosa.load(file_path, sr=1000) 
+            duration = librosa.get_duration(y=y, sr=sr)
+            
+            peak = np.max(np.abs(y))
+            if peak > 0:
+                y = y / peak 
+            if len(y) > 1000:
+                y = y[::len(y)//1000]
+            self.after(0, lambda: self._draw_optimized_plot(y, duration, file_path))
+        except Exception as e:
+            print(f"Load failed: {e}")
+
+    def _draw_optimized_plot(self, y, duration, file_path):
+        self.loading_lbl.destroy()
+        
+        fig, ax = plt.subplots(figsize=(8, 2.5), facecolor="#1A1A1A", dpi=80)
+        ax.fill_between(np.linspace(0, duration, len(y)), y, -y, color="#FF8C42", lw=0)
+        
+        ax.set_facecolor("#1A1A1A")
+        ax.set_ylim(-1, 1)
+        ax.set_axis_off()
+        fig.tight_layout(pad=0)
+
+        if file_path in self.trim_data:
+            self.trim_start, self.trim_end = self.trim_data[file_path]
+        else:
+            self.trim_start, self.trim_end = 0.0, duration
+
+        # Shrouds at the correct saved positions
+        self.shroud_left = ax.axvspan(0, self.trim_start, color="#FF8A423B", alpha=0.6)
+        self.shroud_right = ax.axvspan(self.trim_end, duration, color="#FF8A423B", alpha=0.6)
+
+        # Initialize Lines at the correct saved positions
+        self.line_start = ax.axvline(self.trim_start, color='white', lw=2)
+        self.line_end = ax.axvline(self.trim_end, color='white', lw=2)
+
+        # Update info label immediately to reflect saved data
+        self.wave_info_label.configure(
+            text=f"Editing: {os.path.basename(file_path)} | Start: {self.trim_start:.2f}s | End: {self.trim_end:.2f}s"
+        )
+
+        canvas = FigureCanvasTkAgg(fig, master=self.wave_container)
+        canvas_widget = canvas.get_tk_widget()
+        canvas_widget.pack(fill="both", expand=True)
+
+        self.active_line = None
+
+        def on_motion(event):
+            if event.xdata is None: return
+            
+            near_start = abs(event.xdata - self.trim_start) < (duration * 0.03)
+            near_end = abs(event.xdata - self.trim_end) < (duration * 0.03)
+            canvas_widget.config(cursor="sb_h_double_arrow" if (near_start or near_end) else "")
+
+            if self.active_line:
+                if self.active_line == "start" and event.xdata < self.trim_end:
+                    self.trim_start = max(0, event.xdata)
+                    self.line_start.set_xdata([self.trim_start])
+                    self.shroud_left.set_xy([[0, -1], [0, 1], [self.trim_start, 1], [self.trim_start, -1]])
+
+                elif self.active_line == "end" and event.xdata > self.trim_start:
+                    self.trim_end = min(duration, event.xdata)
+                    self.line_end.set_xdata([self.trim_end])
+                    self.shroud_right.set_xy([[self.trim_end, -1], [self.trim_end, 1], [duration, 1], [duration, -1]])
+                
+                canvas.draw_idle()
+                self.update_idletasks()
+
+        canvas.mpl_connect('button_press_event', lambda e: self._on_wave_press(e, duration))
+        canvas.mpl_connect('motion_notify_event', on_motion)
+        canvas.mpl_connect('button_release_event', self._on_wave_release)
+
+    def _on_wave_press(self, event, duration):
+        if event.xdata is None: return
+        if abs(event.xdata - self.trim_start) < (duration * 0.03):
+            self.active_line = "start"
+        elif abs(event.xdata - self.trim_end) < (duration * 0.03):
+            self.active_line = "end"
+
+    def _on_wave_release(self, event):
+        self.active_line = None
+        self.wave_info_label.configure(text=f"Editing: {os.path.basename(self.current_editing_path)} | Start: {self.trim_start:.2f}s | End: {self.trim_end:.2f}s")
+
+    def apply_trim(self):
+        if hasattr(self, 'current_editing_path'):
+            # Save the coordinates to our dictionary
+            self.trim_data[self.current_editing_path] = (self.trim_start, self.trim_end)
+            messagebox.showinfo("Trim Applied", 
+                                f"Settings saved for {os.path.basename(self.current_editing_path)}\n"
+                                f"Process will run from {self.trim_start:.2f}s to {self.trim_end:.2f}s")
+        else:
+            messagebox.showwarning("Warning", "No file is currently being edited.")
 
     def setup_ui(self):
         # Load fonts
@@ -181,6 +338,7 @@ class UTAUResamplerGUI(ctk.CTk):
         self.audio_textbox = ctk.CTkTextbox(self.top_frame, height=100, font=self.fontME)
         self.audio_textbox.grid(row=0, column=1, padx=10, pady=(10,5), sticky="ew")
         self.audio_textbox.configure(state="disabled")
+        self.audio_textbox.bind("<Double-1>", self.load_selected_to_trimmer)
         self.audio_textbox.drop_target_register(DND_FILES)
         self.audio_textbox.dnd_bind('<<Drop>>', self.handle_drop)
 
@@ -199,6 +357,7 @@ class UTAUResamplerGUI(ctk.CTk):
         self.tabview.pack(fill="x", padx=10, pady=5)
         self.single_tab = self.tabview.add("Single Resampler")
         self.batch_tab = self.tabview.add("Batch Resamplers")
+        self.wave_tab = self.tabview.add("Duration")
 
         # Single UI
         ctk.CTkLabel(self.single_tab, text="Select Resampler:", font=self.title).pack(pady=5)
@@ -293,6 +452,20 @@ class UTAUResamplerGUI(ctk.CTk):
         self.output_entry.grid(row=0, column=1, padx=5, pady=10, sticky="ew")
         ctk.CTkButton(self.out_f, text="Browse", font=self.fontBO, width=120, command=self.select_output_dir).grid(row=0, column=2, padx=10, pady=10)
 
+        # Wave Editor
+        self.wave_info_label = ctk.CTkLabel(self.wave_tab, text="Select a file from the 'Audio Files' list to edit", font=self.fontBO)
+        self.wave_info_label.pack(pady=5)
+
+        self.wave_container = ctk.CTkFrame(self.wave_tab, fg_color="#1E1E1E")
+        self.wave_container.pack(fill="both", expand=True, padx=10, pady=5)
+
+        # Buttons to save settings
+        self.wave_btn_frame = ctk.CTkFrame(self.wave_tab, fg_color="transparent")
+        self.wave_btn_frame.pack(fill="x", pady=5)
+
+        ctk.CTkLabel(self.wave_btn_frame, text="*Note: go back to the batches tab to render in batches", font=self.fontBO).pack(side="left", padx=10)
+        ctk.CTkButton(self.wave_btn_frame, text="Apply Trimming", font=self.fontBO, command=self.apply_trim).pack(side="right", padx=10)
+
         self.progress_bar = ctk.CTkProgressBar(self.main_container1)
         self.progress_bar.pack(fill="x", padx=20, pady=(0, 10))
         self.progress_bar.set(0)
@@ -356,10 +529,9 @@ class UTAUResamplerGUI(ctk.CTk):
 
         self.batch_scroll.grid_columnconfigure(0, weight=1)
         self.batch_scroll.grid_columnconfigure(1, weight=1)
-        resamplers = self.get_resamplers()
+        resamplers = sorted(self.get_resamplers())
         
         self.batch_checkboxes = {}
-        
         for i, res in enumerate(resamplers):
             row = i // 2 
             col = i % 2
@@ -479,11 +651,15 @@ class UTAUResamplerGUI(ctk.CTk):
 
     # Processing Thread 
     def run_process_thread(self):
+        if self.start_btn.cget("state") == "disabled":
+            return
+        self.start_btn.configure(state="disabled", text="PROCESSING...")
         threading.Thread(target=self.execute_resampling, daemon=True).start()
 
     def execute_resampling(self):
         if not self.audio_files or not self.output_dir_var.get():
-            messagebox.showerror("Error", "Missing files or output directory")
+            self.after(0, lambda: messagebox.showerror("Error", "Missing files or output directory"))
+            self.after(0, lambda: self.start_btn.configure(state="normal", text="START RESAMPLING"))
             return
         
         self.start_btn.configure(state="disabled", text="PROCESSING...")
@@ -495,15 +671,20 @@ class UTAUResamplerGUI(ctk.CTk):
         mode = self.tabview.get()
         res_dir = self.resampler_dir_var.get()
         resamplers = []
-        if mode == "Single Resampler":
+        if mode == "Single Resampler" or mode == "Duration":
             if self.resampler_var.get(): resamplers.append(os.path.join(res_dir, self.resampler_var.get()))
         else:
             for name, var in self.batch_checkboxes.items():
                 if var.get(): resamplers.append(os.path.join(res_dir, name))
 
         if not resamplers:
+            self.after(0, lambda: messagebox.showwarning("Warning", "No resampler selected!"))
             self.after(0, lambda: self.start_btn.configure(state="normal", text="START RESAMPLING"))
             return
+
+        speed_val = self.speed_var.get()
+        divisor = 5.0
+        multiplier = 1.0 if abs(speed_val) < 0.01 else (1.0 + (speed_val / divisor) if speed_val > 0 else 1.0 / (1.0 + abs(speed_val) / divisor))
 
         temp_map = {}
         pitch_map = {}
@@ -550,6 +731,13 @@ class UTAUResamplerGUI(ctk.CTk):
                 pitch_map[audio] = detected_pitch
                 print(f"  {BOLD}>> Pitch:{RESET} {detected_pitch}")
 
+                processed_path = self.speed_adjust(temp_map[audio], multiplier)
+                if processed_path != temp_map[audio]:
+                    os.remove(temp_map[audio])
+                
+                temp_map[audio] = processed_path
+                #print(f"{GREEN}[PREP DONE]{RESET} {os.path.basename(audio)} (Speed: {multiplier:.2f}x)")
+
                 # Harvest FRQ (once per file)
                 if self.generate_frq_var.get():
                     print(f"  {CYAN}>> Generating Harvest FRQ...{RESET}")
@@ -574,11 +762,20 @@ class UTAUResamplerGUI(ctk.CTk):
                     self.generate_harvest_frq(temp_map[audio], target_out=out_file)
                     continue
 
+                if not self.trim_data:
+                    print(f"{YELLOW}No trim data found. All files will process at full length.{RESET}")
+                else:
+                    for path, coords in self.trim_data.items():
+                        print(f"{GREEN}File:{RESET} {os.path.basename(path)}")
+                        print(f"  {BOLD}Start:{RESET} {coords[0]:.2f}s | {BOLD}End:{RESET} {coords[1]:.2f}s")
+
                 tasks.append({
                     "res_exe": res_path,
                     "audio_in": temp_map[audio],
+                    "original_path": audio,
                     "audio_out": out_file,
-                    "pitch": pitch_map[audio]
+                    "pitch": pitch_map[audio],
+                    "multiplier": multiplier
                 })
 
         if tasks:
@@ -612,33 +809,36 @@ class UTAUResamplerGUI(ctk.CTk):
         YELLOW, GREEN, RED, CYAN, RESET, BOLD = "\033[93m", "\033[92m", "\033[91m", "\033[96m", "\033[0m", "\033[1m"
         
         try:
-            speed_val = self.speed_var.get()
-            if abs(speed_val) < 0.01:
-                multiplier = 1.0
-                velocity_num = 100
+            processed_input = t["audio_in"] 
+            trim_key = t["original_path"]
+            multiplier = t["multiplier"]
+            
+            with wave.open(processed_input, 'r') as f:
+                full_duration_ms = (f.getnframes() / float(f.getframerate())) * 1000
+
+            if trim_key in self.trim_data:
+                t_start_sec, t_end_sec = self.trim_data[trim_key]
+                offset_ms = (t_start_sec * 1000) / multiplier
+                end_ms = (t_end_sec * 1000) / multiplier
+                trimmed_len_ms = end_ms - offset_ms
+                cutoff_ms = full_duration_ms - end_ms
             else:
-                if speed_val > 0:
-                    multiplier = 1.0 + (speed_val / 5.0)
-                    velocity_num = 100 + (speed_val * 20)
-                else:
-                    multiplier = 1.0 / (1.0 + abs(speed_val) / 5.0)
-                    velocity_num = 100 + (speed_val * 20) 
+                offset_ms = 0
+                trimmed_len_ms = full_duration_ms
+                cutoff_ms = 0
 
-            velocity = str(max(0, int(velocity_num)))
-
-            with wave.open(t["audio_in"], 'r') as f:
-                raw_duration = (f.getnframes() / float(f.getframerate())) * 1000
-                adjusted_len = int(round(raw_duration / multiplier))
-                length = str(max(1, adjusted_len))
-                cons = str(max(1, adjusted_len) + 25)
-                cuttoff = str(-int(length))
+            length = str(int(max(1, trimmed_len_ms)))
+            offset = str(int(offset_ms))
+            cutoff_val = str(-int(max(0, cutoff_ms)))
+            cons = str(int(max(1, trimmed_len_ms - 50)))
+            velocity = str(100)
 
             # arguements
             if "fader2" in os.path.basename(t["res_exe"]).lower():
                 # fader2: <in> <in2> <out> <pitch_hz> <length_ms> <ratio>
                 cmd = [
                     t["res_exe"], 
-                    t["audio_in"], 
+                    processed_input, 
                     "null", 
                     t["audio_out"], 
                     str(float(self.note_to_hz(t["pitch"]))), 
@@ -649,15 +849,15 @@ class UTAUResamplerGUI(ctk.CTk):
                 # Standard UTAU: <in> <out> <pitch> <vel> <flags> <offset> <length> <consonant> <cutoff> <vol> <mod> <tempo> <bend>
                 cmd = [
                     t["res_exe"], 
-                    t["audio_in"], 
+                    processed_input, 
                     t["audio_out"], 
                     t["pitch"], 
                     velocity, 
                     self.flags_var.get() or "", 
-                    "0", 
+                    offset, 
                     length, 
                     cons, 
-                    cuttoff, 
+                    cutoff_val, 
                     self.volume_var.get(), 
                     self.modulation_var.get(), 
                     "!120", 
@@ -668,12 +868,14 @@ class UTAUResamplerGUI(ctk.CTk):
             print(f"{BOLD}Command Arguments:{RESET}")
             for i, arg in enumerate(cmd):
                 print(f"  {CYAN}[{i}]{RESET} {arg}")
-            result = subprocess.run(cmd, timeout=8.0, check=True, capture_output=True, text=True)
+            result = subprocess.run(cmd, timeout=60.0, check=True, capture_output=True, text=True)
             
             if result.stdout.strip():
                 print(f"{BOLD}Output:{RESET} {result.stdout.strip()}")
             
             print(f"{GREEN}[SUCCESS] Rendered: {os.path.basename(t['audio_out'])}{RESET}")
+            if processed_input != t["audio_in"] and os.path.exists(processed_input):
+                os.remove(processed_input)
             
             if self.gen_spec_var.get(): 
                 self.save_spectrogram(t["audio_out"])
@@ -692,12 +894,12 @@ class UTAUResamplerGUI(ctk.CTk):
 
     def finish_job(self, errors):
         self.start_btn.configure(state="normal", text="START RESAMPLING")
-        self.progress_bar.set(0) # Reset progress bar
+        self.progress_bar.set(0)
 
         if not errors:
             messagebox.showinfo("Success", "All files processed successfully!")
         else:
-            error_msg = "\n".join(errors[:5]) # Show first 5 errors to avoid a massive popup
+            error_msg = "\n".join(errors[:5])
             if len(errors) > 5:
                 error_msg += f"\n...and {len(errors) - 5} more."
             
