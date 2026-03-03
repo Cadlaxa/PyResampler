@@ -212,15 +212,24 @@ class UTAUResamplerGUI(ctk.CTk):
 
     def _load_waveform_data(self, file_path):
         try:
-            y, sr = librosa.load(file_path, sr=1000) 
+            target_sr = 1000
+            y, sr = librosa.load(file_path, sr=target_sr)
             duration = librosa.get_duration(y=y, sr=sr)
             
             peak = np.max(np.abs(y))
             if peak > 0:
                 y = y / peak 
-            if len(y) > 1000:
-                y = y[::len(y)//1000]
-            self.after(0, lambda: self._draw_optimized_plot(y, duration, file_path))
+
+            resolution = 1500
+            chunk_size = len(y) // resolution
+            
+            if chunk_size > 0:
+                y_reshaped = y[:resolution * chunk_size].reshape(resolution, chunk_size)
+                y_solid = np.max(np.abs(y_reshaped), axis=1)
+            else:
+                y_solid = np.abs(y)
+
+            self.after(0, lambda: self._draw_optimized_plot(y_solid, duration, file_path))
         except Exception as e:
             print(f"Load failed: {e}")
 
@@ -453,12 +462,19 @@ class UTAUResamplerGUI(ctk.CTk):
         ctk.CTkButton(self.out_f, text="Browse", font=self.fontBO, width=120, command=self.select_output_dir).grid(row=0, column=2, padx=10, pady=10)
 
         # Wave Editor
-        self.wave_info_label = ctk.CTkLabel(self.wave_tab, text="Select a file from the 'Audio Files' list to edit", font=self.fontBO)
+        self.wave_info_label = ctk.CTkLabel(self.wave_tab, text="No file selected", font=self.fontBO)
         self.wave_info_label.pack(pady=5)
 
         self.wave_container = ctk.CTkFrame(self.wave_tab, fg_color="#1E1E1E")
         self.wave_container.pack(fill="both", expand=True, padx=10, pady=5)
 
+        ctk.CTkLabel(
+            self.wave_container, 
+            text="Double-click a file in the list to view waveform", 
+            font=self.fontME,
+            text_color="gray"
+        ).pack(expand=True)
+        
         # Buttons to save settings
         self.wave_btn_frame = ctk.CTkFrame(self.wave_tab, fg_color="transparent")
         self.wave_btn_frame.pack(fill="x", pady=5)
@@ -576,7 +592,22 @@ class UTAUResamplerGUI(ctk.CTk):
 
     def clear_audio_files(self):
         self.audio_files = []
+        self.trim_data = {}
+        self.current_editing_path = None
+        
         self.update_audio_display()
+        for widget in self.wave_container.winfo_children():
+            widget.destroy()
+            
+        ctk.CTkLabel(
+            self.wave_container, 
+            text="Double-click a file in the list to view waveform", 
+            font=self.fontME,
+            text_color="gray"
+        ).pack(expand=True)
+        
+        if hasattr(self, 'wave_info_label'):
+            self.wave_info_label.configure(text="No file selected")
 
     def update_audio_display(self):
         self.audio_textbox.configure(state="normal")
