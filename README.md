@@ -13,7 +13,7 @@ Python GUI toolkit for passing down Resampler arguments (single and batch resamp
 - [x] Accept any type of audio files
 - [x] Convert to wav (temp file) before sending it to the resampler
 - [x] Fader2.exe support
-- [ ] Audio length/duration editor
+- [x] Audio length/duration editor
 ---
 ## How to use:
 - Install necessary modules in order for the GUI script to run.
