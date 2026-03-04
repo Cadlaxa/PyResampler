@@ -1,5 +1,5 @@
 import os, sys, subprocess, threading
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from ruamel.yaml import YAML, version
@@ -42,7 +42,7 @@ class UTAUResamplerGUI(ctk.CTk):
         self.iconbitmap(str(icon_path))
 
         self.title("PyResampler - Batch Resampling GUI")
-        self.version = "0.0.4"
+        self.version = "0.0.5"
         self.config_path = "config.yaml"
         self.config = self.load_config()
         self.audio_files = []
@@ -695,6 +695,19 @@ class UTAUResamplerGUI(ctk.CTk):
         
         self.start_btn.configure(state="disabled", text="PROCESSING...")
         errors = []
+
+        num_files = len(self.audio_files)
+        res_count = 0
+        mode = self.tabview.get()
+        if mode in ["Single Resampler", "Duration"]:
+            res_count = 1 if self.resampler_var.get() else 0
+        else:
+            res_count = sum(1 for var in self.batch_checkboxes.values() if var.get())
+        
+        s1_per_file = 4 + (1 if self.generate_frq_var.get() else 0)
+        self.total_steps = (num_files * s1_per_file) + (num_files * res_count)
+        self.steps_completed = 0
+        self.progress_lock = threading.Lock()
         
         # Color codes
         BLUE, YELLOW, GREEN, RED, CYAN, RESET, BOLD = "\033[94m", "\033[93m", "\033[92m", "\033[91m", "\033[96m", "\033[0m", "\033[1m"
@@ -729,7 +742,6 @@ class UTAUResamplerGUI(ctk.CTk):
             
             try:
                 seg = AudioSegment.from_file(audio)
-                
                 # Check UTAU Compliance
                 is_wav = audio.lower().endswith(".wav")
                 is_mono = seg.channels == 1
@@ -744,6 +756,7 @@ class UTAUResamplerGUI(ctk.CTk):
                     if not is_44k: reasons.append(f"Sample rate ({seg.frame_rate}Hz)")
                     
                     print(f"  {YELLOW}>> Normalizing: {', '.join(reasons)}...{RESET}")
+                    self.tick_progress()
                     
                     t_file = tempfile.NamedTemporaryFile(suffix=".wav", dir=self.specific_temp_dir, delete=False)
                     normalized_path = t_file.name
@@ -752,6 +765,7 @@ class UTAUResamplerGUI(ctk.CTk):
                     # Apply UTAU Standards
                     seg.set_channels(1).set_sample_width(2).set_frame_rate(44100).export(normalized_path, format="wav")
                     temp_map[audio] = normalized_path
+                    self.tick_progress()
                     print(f"  {GREEN}>> Temporary UTAU-compliant WAV created.{RESET}")
                 else:
                     print(f"  {GREEN}>> Already UTAU-compliant. Using original file.{RESET}")
@@ -760,6 +774,7 @@ class UTAUResamplerGUI(ctk.CTk):
                 # Pitch Detection (once per file)
                 detected_pitch = self.detect_pitch(temp_map[audio]) if self.follow_pitch_var.get() else self.pitch_note_var.get()
                 pitch_map[audio] = detected_pitch
+                self.tick_progress()
                 print(f"  {BOLD}>> Pitch:{RESET} {detected_pitch}")
 
                 processed_path = self.speed_adjust(temp_map[audio], multiplier)
@@ -771,6 +786,7 @@ class UTAUResamplerGUI(ctk.CTk):
 
                 # Harvest FRQ (once per file)
                 if self.generate_frq_var.get():
+                    self.tick_progress()
                     print(f"  {CYAN}>> Generating Harvest FRQ...{RESET}")
                     self.generate_harvest_frq(temp_map[audio])
 
@@ -787,6 +803,7 @@ class UTAUResamplerGUI(ctk.CTk):
                 out_folder = self.output_dir_var.get() if len(resamplers) == 1 else os.path.join(self.output_dir_var.get(), res_clean)
                 os.makedirs(out_folder, exist_ok=True)
                 out_file = os.path.join(out_folder, f"{os.path.splitext(os.path.basename(audio))[0]}.wav")
+                self.tick_progress()
                 
                 # Check for Only FRQ mode
                 if self.only_frq_var.get():
@@ -810,19 +827,16 @@ class UTAUResamplerGUI(ctk.CTk):
                 })
 
         if tasks:
-            total = len(tasks)
+            self.total_steps = len(tasks) * 3
+            self.steps_completed = 0
+            self.progress_lock = threading.Lock()
+            
             try: num_threads = int(self.threads_var.get() or 1)
             except: num_threads = 1
             
             with ThreadPoolExecutor(max_workers=max(1, num_threads)) as executor:
+                self.tick_progress()
                 futures = {executor.submit(self.run_resampler, t): t for t in tasks}
-                
-                for i, future in enumerate(futures):
-                    try:
-                        future.result()
-                    except Exception as e:
-                        errors.append(f"File {os.path.basename(futures[future]['audio_out'])}: {str(e)}")
-                    self.after(0, lambda v=(i+1)/total: self.progress_bar.set(v))
 
         # STAGE 3: Final Cleanup
         print(f"\n{BLUE}{BOLD}=== STAGE 3: CLEANUP ==={RESET}")
@@ -834,8 +848,15 @@ class UTAUResamplerGUI(ctk.CTk):
                 except: pass
         
         self.after(0, lambda: self.finish_job(errors))
+    
+    def tick_progress(self):
+        with self.progress_lock:
+            self.steps_completed += 1
+            progress_value = self.steps_completed / self.total_steps
+            self.after(0, lambda v=progress_value: self.progress_bar.set(v))
 
     def run_resampler(self, t):
+
         # ANSI Color Codes
         YELLOW, GREEN, RED, CYAN, RESET, BOLD = "\033[93m", "\033[92m", "\033[91m", "\033[96m", "\033[0m", "\033[1m"
         
@@ -896,30 +917,50 @@ class UTAUResamplerGUI(ctk.CTk):
                 ]
 
             print(f"{YELLOW}{BOLD}[EXEC] {os.path.basename(t['res_exe'])} -> {os.path.basename(t['audio_out'])}{RESET}")
-            print(f"{BOLD}Command Arguments:{RESET}")
+
+            print(f"\n{BOLD}Command Arguments:{RESET}")
             for i, arg in enumerate(cmd):
                 print(f"  {CYAN}[{i}]{RESET} {arg}")
-            result = subprocess.run(cmd, timeout=60.0, check=True, capture_output=True, text=True)
             
-            if result.stdout.strip():
-                print(f"{BOLD}Output:{RESET} {result.stdout.strip()}")
-            
-            print(f"{GREEN}[SUCCESS] Rendered: {os.path.basename(t['audio_out'])}{RESET}")
+            process = subprocess.Popen(
+                cmd, 
+                stdout=subprocess.PIPE, 
+                stderr=subprocess.STDOUT, 
+                text=True,
+                bufsize=1,
+                universal_newlines=True
+            )
+
+            if process.stdout:
+                for line in process.stdout:
+                    clean_line = line.strip()
+                    if clean_line:
+                        print(f"  {CYAN}> {RESET}{clean_line}")
+
+            try:
+                process.wait(timeout=120.0)
+                self.tick_progress()
+            except subprocess.TimeoutExpired:
+                process.kill()
+                print(f"{RED}[TIMEOUT] Resampler killed after 120s{RESET}")
+                raise
+
+            if process.returncode == 0:
+                print(f"{GREEN}[SUCCESS] Rendered: {os.path.basename(t['audio_out'])}{RESET}")
+            else:
+                print(f"{RED}[ERROR] Resampler exited with code {process.returncode}{RESET}")
+
             if processed_input != t["audio_in"] and os.path.exists(processed_input):
                 os.remove(processed_input)
             
             if self.gen_spec_var.get(): 
                 self.save_spectrogram(t["audio_out"])
-        
-        except subprocess.TimeoutExpired:
-            print(f"Skipped (Timeout): {os.path.basename(t['audio_in'])} took too long.")
-            if os.path.exists(t["audio_out"]):
-                os.remove(t["audio_out"])
                 
         except subprocess.CalledProcessError as e:
             print(f"{RED}[FAILED] Resampler returned error code {e.returncode}{RESET}")
             if e.stderr:
                 print(f"{RED}Error Details: {e.stderr.strip()}{RESET}")
+
         except Exception as e:
             print(f"{RED}[ERROR] {os.path.basename(t['audio_out'])}: {e}{RESET}")
 
