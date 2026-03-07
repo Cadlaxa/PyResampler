@@ -93,6 +93,17 @@ class UTAUResamplerGUI(ctk.CTk):
         self.setup_ui()
         self.toggle_pitch_entry()
         self.check_for_updates()
+
+        vars_to_watch = [
+            self.flags_var, 
+            self.threads_var, 
+            self.volume_var, 
+            self.modulation_var,
+            self.pitch_note_var
+        ]
+
+        for var in vars_to_watch:
+            var.trace_add("write", lambda *args: self.save_config())
     
     def clear_cache(self):
         temp_dir = self.specific_temp_dir
@@ -607,6 +618,8 @@ class UTAUResamplerGUI(ctk.CTk):
                 fg_color="#3b3b3b"
             )
             saved_pitch = self.config.get("pitch_note", "C4")
+            if "Auto" in str(saved_pitch):
+                saved_pitch = "C4"
             self.pitch_note_var.set(saved_pitch)
         self.save_config()
 
