@@ -17,13 +17,6 @@ from pathlib import Path as P
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 
 base_path = os.path.dirname(os.path.abspath(__file__))
-ffmpeg_folder = os.path.join(base_path, "Ffmpeg")
-
-os.environ["PATH"] = ffmpeg_folder + os.pathsep + os.environ["PATH"]
-from pydub import AudioSegment
-
-print("FFMPEG folder injected:", ffmpeg_folder)
-
 yaml = YAML()
 yaml.preserve_quotes = True
 
@@ -32,6 +25,39 @@ ctk.set_default_color_theme("Assets/Theme/orange.json")
 
 ASSETS = P('./Assets')
 FONTS = P(ASSETS, 'Fonts')
+
+def setup_ffmpeg():
+    current_os = platform.system()
+    base_path = os.path.dirname(os.path.abspath(__file__))
+    
+    os_map = {
+        "Windows": "Assets/Ffmpeg/win",
+        "Darwin": "Assets/Ffmpeg/mac",
+        "Linux": "Assets/Ffmpeg/linux"
+    }
+    
+    folder_name = os_map.get(current_os)
+    if not folder_name:
+        print(f"[{current_os}] OS not recognized for local bundling.")
+        return
+
+    ffmpeg_folder = os.path.join(base_path, folder_name)
+    if os.path.exists(ffmpeg_folder):
+        os.environ["PATH"] = ffmpeg_folder + os.pathsep + os.environ["PATH"]
+        
+        if current_os in ["Darwin", "Linux"]:
+            for bin_file in ["ffmpeg", "ffprobe"]:
+                bin_path = os.path.join(ffmpeg_folder, bin_file)
+                if os.path.exists(bin_path):
+                    # Standard chmod +x equivalent
+                    st = os.stat(bin_path)
+                    os.chmod(bin_path, st.st_mode | os.stat.S_IEXEC)
+        
+        print(f"[{current_os}] FFmpeg loaded from: {ffmpeg_folder}")
+    else:
+        print(f"[{current_os}] Folder {folder_name} missing. Using system default.\n")
+setup_ffmpeg()
+from pydub import AudioSegment
 
 class UTAUResamplerGUI(ctk.CTk):
     def __init__(self):
@@ -62,9 +88,10 @@ class UTAUResamplerGUI(ctk.CTk):
         self.only_frq_var = ctk.BooleanVar(value=False)
         self.follow_pitch_var = ctk.BooleanVar(value=False)
         self.speed_var = ctk.DoubleVar(value=0.0)
-        self.config = self.load_config()
+        self.load_config()
 
         self.setup_ui()
+        self.toggle_pitch_entry()
         self.check_for_updates()
     
     def clear_cache(self):
@@ -136,8 +163,6 @@ class UTAUResamplerGUI(ctk.CTk):
         self.resampler_dir_var = ctk.StringVar(value=self.config.get("resampler_directory", ""))
         self.output_dir_var = ctk.StringVar(value=self.config.get("output_directory", ""))
         self.resampler_var = ctk.StringVar(value=self.config.get("default_resampler", ""))
-        
-        #self.toggle_pitch_entry()
         return self.config
 
     def save_config(self, key=None, value=None):
@@ -263,26 +288,37 @@ class UTAUResamplerGUI(ctk.CTk):
 
     def _load_waveform_data(self, file_path):
         try:
-            target_sr = 1000
-            y, sr = librosa.load(file_path, sr=target_sr)
-            duration = librosa.get_duration(y=y, sr=sr)
+            probe = subprocess.check_output([
+                'ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+                '-of', 'default=noprint_wrappers=1:nokey=1', file_path
+            ]).decode('utf-8').strip()
+            duration = float(probe)
+
+            target_points = 1500
+            cmd = [
+                'ffmpeg', '-i', file_path,
+                '-ar', '1000', '-ac', '1', '-f', 's8', '-acodec', 'pcm_s8', '-'
+            ]
+            
+            process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            raw_data, _ = process.communicate()
+            y = np.frombuffer(raw_data, dtype=np.int8).astype(np.float32)
             
             peak = np.max(np.abs(y))
             if peak > 0:
-                y = y / peak 
+                margin = 0.8 
+                y = (y / peak) * margin
 
-            resolution = 1500
-            chunk_size = len(y) // resolution
-            
-            if chunk_size > 0:
-                y_reshaped = y[:resolution * chunk_size].reshape(resolution, chunk_size)
+            if len(y) > target_points:
+                y_reshaped = y[:len(y) // target_points * target_points].reshape(target_points, -1)
                 y_solid = np.max(np.abs(y_reshaped), axis=1)
             else:
                 y_solid = np.abs(y)
 
             self.after(0, lambda: self._draw_optimized_plot(y_solid, duration, file_path))
+            
         except Exception as e:
-            print(f"Load failed: {e}")
+            print(f"Fast Load failed: {e}")
 
     def _draw_optimized_plot(self, y, duration, file_path):
         self.loading_lbl.destroy()
@@ -551,7 +587,10 @@ class UTAUResamplerGUI(ctk.CTk):
             self.output_dir_var.set(d)
             self.save_config()
 
-    def toggle_pitch_entry(self):
+    def toggle_pitch_entry(self, *args):
+        if not hasattr(self, 'pitch_entry'):
+            return
+
         if self.follow_pitch_var.get():
             # DISABLED STATE
             self.pitch_entry.configure(
@@ -564,10 +603,11 @@ class UTAUResamplerGUI(ctk.CTk):
             # NORMAL STATE
             self.pitch_entry.configure(
                 state="normal", 
-                text_color="white",
+                text_color="white", 
                 fg_color="#3b3b3b"
             )
-            self.pitch_note_var.set("C4")
+            saved_pitch = self.config.get("pitch_note", "C4")
+            self.pitch_note_var.set(saved_pitch)
         self.save_config()
 
     def get_resamplers(self):
@@ -982,18 +1022,13 @@ class UTAUResamplerGUI(ctk.CTk):
 
         # ANSI Color Codes
         YELLOW, GREEN, RED, CYAN, RESET, BOLD = "\033[93m", "\033[92m", "\033[91m", "\033[96m", "\033[0m", "\033[1m"
+        current_os = platform.system()
         
         try:
             if t.get("only_frq"):
                 print(f"{CYAN}[ONLY FRQ MODE]{RESET} Analyzing {os.path.basename(t['audio_in'])}...")
-                
-                # 1. Determine the final .frq destination
-                # We want the .frq to have the same name as the original audio file
                 base_name = os.path.splitext(os.path.basename(t["original_path"]))[0]
                 final_frq_path = os.path.join(self.output_dir_var.get(), f"{base_name}.wav")
-
-                # 2. Run the generator (Harvest or pYIN)
-                # target_out tells the function where to save the .frq file
                 self.generate_harvest_frq(t["audio_in"], target_out=final_frq_path)
                 
                 print(f"{GREEN}[SUCCESS] FRQ Saved to:{RESET} {self.output_dir_var.get()}")
@@ -1044,11 +1079,12 @@ class UTAUResamplerGUI(ctk.CTk):
             cons = str(int(max(1, trimmed_len_ms - 50)))
             velocity = str(100)
 
+            res_path = t["res_exe"]
             # arguements
-            if "fader2" in os.path.basename(t["res_exe"]).lower():
+            if "fader2" in os.path.basename(res_path).lower():
                 # fader2: <in> <in2> <out> <pitch_hz> <length_ms> <ratio>
                 cmd = [
-                    t["res_exe"], 
+                    res_path, 
                     processed_input, 
                     "null", 
                     t["audio_out"], 
@@ -1059,7 +1095,7 @@ class UTAUResamplerGUI(ctk.CTk):
             else:
                 # Standard UTAU: <in> <out> <pitch> <vel> <flags> <offset> <length> <consonant> <cutoff> <vol> <mod> <tempo> <bend>
                 cmd = [
-                    t["res_exe"], 
+                    res_path, 
                     processed_input, 
                     t["audio_out"], 
                     t["pitch"], 
@@ -1075,7 +1111,13 @@ class UTAUResamplerGUI(ctk.CTk):
                     "AA#1000#"
                 ]
 
-            print(f"{YELLOW}{BOLD}[EXEC] {os.path.basename(t['res_exe'])} -> {os.path.basename(t['audio_out'])}{RESET}")
+            if current_os != "Windows":
+                if not os.access(res_path, os.X_OK):
+                    os.chmod(res_path, os.stat(res_path).st_mode | 0o111)
+                # Prepend wine to the command
+                cmd = ["wine"] + cmd
+
+            print(f"{YELLOW}{BOLD}[EXEC] {os.path.basename(res_path)} -> {os.path.basename(t['audio_out'])}{RESET}")
 
             print(f"\n{BOLD}Command Arguments:{RESET}")
             for i, arg in enumerate(cmd):
