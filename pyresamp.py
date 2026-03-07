@@ -67,7 +67,7 @@ class UTAUResamplerGUI(ctk.CTk):
         self.iconbitmap(str(icon_path))
 
         self.title("PyResampler - Batch Resampling GUI")
-        self.version = "0.0.6"
+        self.version = "0.0.7"
         self.config_path = "config.yaml"
         self.yaml = YAML()
         self.audio_files = []
@@ -88,6 +88,8 @@ class UTAUResamplerGUI(ctk.CTk):
         self.only_frq_var = ctk.BooleanVar(value=False)
         self.follow_pitch_var = ctk.BooleanVar(value=False)
         self.speed_var = ctk.DoubleVar(value=0.0)
+        self.open_output_var = ctk.BooleanVar(value=False)
+        self.wine_path_var = ctk.StringVar(value="")
         self.load_config()
 
         self.setup_ui()
@@ -99,11 +101,17 @@ class UTAUResamplerGUI(ctk.CTk):
             self.threads_var, 
             self.volume_var, 
             self.modulation_var,
-            self.pitch_note_var
+            self.pitch_note_var,
+            self.wine_path_var
         ]
 
         for var in vars_to_watch:
             var.trace_add("write", lambda *args: self.save_config())
+        
+        saved_theme = self.config.get("theme", "System")
+        ctk.set_appearance_mode(saved_theme)
+        if hasattr(self, 'theme_menu'):
+            self.theme_menu.set(saved_theme)
     
     def clear_cache(self):
         temp_dir = self.specific_temp_dir
@@ -169,7 +177,9 @@ class UTAUResamplerGUI(ctk.CTk):
         self.flags_var.set(str(self.config.get("flags", "")))
         self.threads_var.set(str(self.config.get("threads", "4")))
         self.pitch_note_var.set(str(self.config.get("pitch_note", "C4")))
-        
+        self.open_output_var.set(str(self.config.get("open_output", False)))
+        self.wine_path_var.set(str(self.config.get("wine_path", "")))
+
         self.speed_var.set(float(self.config.get("speed", 0.0)))
         self.resampler_dir_var = ctk.StringVar(value=self.config.get("resampler_directory", ""))
         self.output_dir_var = ctk.StringVar(value=self.config.get("output_directory", ""))
@@ -196,7 +206,9 @@ class UTAUResamplerGUI(ctk.CTk):
             "pitch_note": self.pitch_note_var.get(),
             "speed": self.speed_var.get(),
             "resampler_directory": self.resampler_dir_var.get(),
-            "output_directory": self.output_dir_var.get()
+            "output_directory": self.output_dir_var.get(),
+            "open_output": self.open_output_var.get(),
+            "wine_path": self.wine_path_var.get()
         }
         self.config.update(gui_settings)
 
@@ -207,6 +219,23 @@ class UTAUResamplerGUI(ctk.CTk):
             print("\033[91m[ERROR] Config.yaml is locked/open in another app!\033[0m")
         except Exception as e:
             print(f"\033[91m[ERROR] Save failed: {e}\033[0m")
+        
+    def change_theme_event(self, new_theme: str):
+        ctk.set_appearance_mode(new_theme)
+        self.save_config(key="theme", value=new_theme)
+
+    def open_output_folder(self):
+        path = self.output_dir_var.get()
+        if not os.path.exists(path):
+            return
+            
+        current_os = platform.system()
+        if current_os == "Windows":
+            os.startfile(path)
+        elif current_os == "Darwin":
+            subprocess.Popen(["open", path])
+        else: # Linux
+            subprocess.Popen(["xdg-open", path])
     
     def update_speed_label(self, value):
         rounded_val = round(float(value), 1)
@@ -465,6 +494,7 @@ class UTAUResamplerGUI(ctk.CTk):
         self.single_tab = self.tabview.add("Single Resampler")
         self.batch_tab = self.tabview.add("Batch Resamplers")
         self.wave_tab = self.tabview.add("Duration")
+        self.settings_tab = self.tabview.add("Settings")
 
         # Single UI
         ctk.CTkLabel(self.single_tab, text="Select Resampler:", font=self.title).pack(pady=5)
@@ -579,8 +609,76 @@ class UTAUResamplerGUI(ctk.CTk):
 
         self.start_btn = ctk.CTkButton(self.main_container1, text="START RESAMPLING", font=self.resample, height=50, command=self.run_process_thread)
         self.start_btn.pack(pady=(5, 20), padx=10, fill="x")
+
+        # Theme
+        ctk.CTkLabel(self.settings_tab, text="Settings:", font=self.title).pack(pady=0)
+        self.settings_frame = ctk.CTkFrame(self.settings_tab)
+        self.settings_frame.pack(fill="x", padx=10, pady=5)
+        self.settings_frame.columnconfigure(0, weight=2)
+        self.settings_frame.columnconfigure(1, weight=1)
+        self.settings_frame.columnconfigure(2, weight=0)
+        self.settings_frame.columnconfigure(3, weight=0)
+
+        ctk.CTkLabel(self.settings_frame, text="UI Theme:", font=self.fontBO).grid(row=0, column=0, padx=10, pady=(10, 5), sticky="w")
+        self.theme_menu = ctk.CTkOptionMenu(self.settings_frame, font=self.fontME,
+            values=["System", "Dark", "Light"], command=self.change_theme_event)
+        self.theme_menu.grid(row=0, column=1, padx=10, pady=(10, 5), sticky="we", columnspan=3)
+
+        # Wine Path
+        ctk.CTkLabel(self.settings_frame, text="Wine Path:", font=self.fontBO).grid(row=1, column=0, padx=10, pady=5, sticky="w")
+        self.wine_path_entry = ctk.CTkEntry(self.settings_frame,font=self.fontME, textvariable=self.wine_path_var, width=200)
+        self.wine_path_entry.grid(row=1, column=1, padx=10, pady=5, sticky="we")
+        self.wine_path_bt = ctk.CTkButton(self.settings_frame, text="Detect", font=self.fontBO, command=self.detect_wine_path)
+        self.wine_path_bt.grid(row=1, column=3, padx=(0,10), pady=5, sticky="we")
+        self.wine_path_bt1 = ctk.CTkButton(self.settings_frame, text="Open", font=self.fontBO, command=self.manual_select_wine)
+        self.wine_path_bt1.grid(row=1, column=2, padx=(0,10), pady=5, sticky="we")
+
+        # Open Output After Render
+        self.open_output_check = ctk.CTkCheckBox(self.settings_frame, text="Open Output Folder after Render", 
+            variable=self.open_output_var, font=self.fontBO, command=lambda: self.save_config())
+        self.open_output_check.grid(row=2, column=0, columnspan=3, padx=10, pady=5, sticky="w")
         
     # Logic
+    def manual_select_wine(self):
+        path = ctk.filedialog.askopenfilename(
+            title="Select Wine Binary (wine or wine64)",
+            filetypes=[("All Files", "*.*")] 
+        )
+        
+        if path:
+            self.wine_path_var.set(path)
+            
+            # Save to config so it persists
+            self.save_config(key="wine_path", value=path)
+            print(f"Manual Wine Path set to: {path}")
+            
+    def detect_wine_path(self):
+        current_os = platform.system()
+        
+        if current_os == "Windows":
+            messagebox.showinfo("Wine detection skipped", "You don't need Wine on Windows you silly.")
+            return
+        detected = shutil.which("wine64") or shutil.which("wine")
+
+        if not detected:
+            fallbacks = [
+                "/usr/local/bin/wine64",
+                "/usr/bin/wine64",
+                "/opt/homebrew/bin/wine64",  # Apple Silicon Mac
+                "/Applications/Wine Devel.app/Contents/Resources/bin/wine"
+            ]
+            for path in fallbacks:
+                if os.path.exists(path):
+                    detected = path
+                    break
+
+        if detected:
+            self.wine_path_var.set(detected)
+            self.save_config(key="wine_path", value=detected)
+            print(f"Wine detected: {detected}")
+        else:
+            messagebox.showwarning("Wine Not Found", "Wine not found in common locations. Please set path manually.")
+
     def save_resampler_config(self, choice):
        self.save_config(key="default_resampler", value=choice)
               
@@ -607,7 +705,6 @@ class UTAUResamplerGUI(ctk.CTk):
             self.pitch_entry.configure(
                 state="disabled", 
                 text_color="gray",
-                fg_color="#333333"
             )
             self.pitch_note_var.set("Auto detects pitch")
         else:
@@ -615,7 +712,6 @@ class UTAUResamplerGUI(ctk.CTk):
             self.pitch_entry.configure(
                 state="normal", 
                 text_color="white", 
-                fg_color="#3b3b3b"
             )
             saved_pitch = self.config.get("pitch_note", "C4")
             if "Auto" in str(saved_pitch):
@@ -797,7 +893,7 @@ class UTAUResamplerGUI(ctk.CTk):
         num_files = len(self.audio_files)
         res_count = 0
         mode = self.tabview.get()
-        if mode in ["Single Resampler", "Duration"]:
+        if mode in ["Single Resampler", "Duration", "Settings"]:
             res_count = 1 if self.resampler_var.get() else 0
         else:
             res_count = sum(1 for var in self.batch_checkboxes.values() if var.get())
@@ -989,6 +1085,9 @@ class UTAUResamplerGUI(ctk.CTk):
                     if self.gen_spec_var.get() and final_stitched_path:
                         print(f"{CYAN}>> Generating Spectrogram for full output...{RESET}")
                         self.save_spectrogram(final_stitched_path)
+                    
+                    if self.open_output_var.get():
+                        self.open_output_folder()
 
             # 3. Cleanup logic
             print(f"{CYAN}>> Cleaning up temporary workspace...{RESET}")
@@ -1125,10 +1224,20 @@ class UTAUResamplerGUI(ctk.CTk):
                 ]
 
             if current_os != "Windows":
+                wine_cmd = self.wine_path_var.get().strip()
+                
+                if not wine_cmd:
+                    error_msg = "Wine path is not set! Please go to the Settings tab and set your Wine binary path."
+                    print(f"{RED}[CRITICAL] {error_msg}{RESET}")
+                    messagebox.showerror("Wine Error", error_msg)
+                    return
+
                 if not os.access(res_path, os.X_OK):
-                    os.chmod(res_path, os.stat(res_path).st_mode | 0o111)
-                # Prepend wine to the command
-                cmd = ["wine"] + cmd
+                    try:
+                        os.chmod(res_path, os.stat(res_path).st_mode | 0o111)
+                    except Exception as e:
+                        print(f"{RED}[ERROR] Could not set permissions: {e}{RESET}")
+                cmd = [wine_cmd] + cmd
 
             print(f"{YELLOW}{BOLD}[EXEC] {os.path.basename(res_path)} -> {os.path.basename(t['audio_out'])}{RESET}")
 
