@@ -457,7 +457,7 @@ class UTAUResamplerGUI(ctk.CTk):
         ax.axvspan(-padding, 0, color="#FF8A4296", zorder=0) 
         ax.axvspan(duration, duration + padding, color="#FF8A4296", zorder=0)
         
-        ax.set_facecolor("#1A1A1A7D")
+        ax.set_facecolor("#1A1A1AFF")
         fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
 
         if file_path in self.trim_data:
@@ -967,14 +967,23 @@ class UTAUResamplerGUI(ctk.CTk):
 
     def detect_pitch(self, audio_path):
         try:
-            y, sr = librosa.load(audio_path, sr=22050, duration=3.0)
-            y_trimmed, _ = librosa.effects.trim(y, top_db=20)
-            if len(y_trimmed) == 0: return "C4"
-            f0 = librosa.yin(y_trimmed[:int(sr*1.0)], fmin=librosa.note_to_hz('C2'), fmax=librosa.note_to_hz('C6'))
-            f0 = f0[~np.isnan(f0)]
-            if len(f0) > 0:
-                avg_f0 = np.nanmedian(f0)
-                note = librosa.midi_to_note(int(round(librosa.hz_to_midi(avg_f0))))
+            y, sr = librosa.load(audio_path, sr=22050, duration=1.0)
+            y_trimmed, _ = librosa.effects.trim(y, top_db=25)
+            if len(y_trimmed) < 100: return "C4"
+
+            f0, voiced_flag, voiced_probs = librosa.pyin(
+                y_trimmed, 
+                fmin=librosa.note_to_hz('C2'), 
+                fmax=librosa.note_to_hz('C6'),
+                fill_na=None
+            )
+
+            f0_clean = f0[voiced_flag]
+            
+            if len(f0_clean) > 0:
+                avg_f0 = np.median(f0_clean)
+                midi_note = int(round(librosa.hz_to_midi(avg_f0)))
+                note = librosa.midi_to_note(midi_note)
                 return note.replace('♯', '#').replace('♭', 'b')
         except Exception as e:
             print(f"Pitch detection failed: {e}")
@@ -996,12 +1005,41 @@ class UTAUResamplerGUI(ctk.CTk):
         except Exception as e:
             print(f"Spectrogram Error: {e}")
 
+    def _calculate_base_frq(self, f0, f0_ceil):
+        n = len(f0)
+        if n < 2:
+            return np.median(f0) if n > 0 else 440.0
+        
+        avg_frq = 0
+        tally = 0
+        f0_floor = world.default_f0_floor
+
+        # Filter f0 to valid range before weighing
+        for i in range(n):
+            if f0_floor <= f0[i] <= f0_ceil:
+                if i < 1:
+                    q = f0[i+1] - f0[i]
+                elif i == n - 1:
+                    q = f0[i] - f0[i-1]
+                else:
+                    q = (f0[i+1] - f0[i-1]) / 2
+                
+                # Use Gaussian-like weighting: smoother pitch gets higher priority
+                weight = 2 ** (-q * q)
+                avg_frq += f0[i] * weight
+                tally += weight
+
+        return (avg_frq / tally) if tally > 0 else 440.0
+
     def generate_harvest_frq(self, input_wav, target_out=None):
         try:
             x, fs = sf.read(input_wav)
             if x.ndim > 1: x = np.mean(x, axis=1)
+            
             hop = 256
-            f0, t = world.harvest(x, fs, f0_ceil=1100, frame_period=1000 * hop / fs)
+            f0_ceil = 1100
+            
+            f0, t = world.harvest(x, fs, f0_ceil=f0_ceil, frame_period=1000 * hop / fs)
             window_size = hop * 2
             energy = np.array([
                 np.sqrt(np.mean(x[int(ti*fs) : int(ti*fs) + window_size]**2)) 
@@ -1009,9 +1047,8 @@ class UTAUResamplerGUI(ctk.CTk):
                 for ti in t
             ])
             
-            base_f0 = np.median(f0[f0 > 0]) if np.any(f0 > 0) else 440.0
-            frq_path = os.path.splitext(target_out if target_out else input_wav)[0] + "_wav" + ".frq"
-            
+            base_f0 = self._calculate_base_frq(f0, f0_ceil)
+            frq_path = os.path.splitext(target_out if target_out else input_wav)[0] + "_wav.frq"
             frq_data = np.stack((f0, energy), axis=-1).astype(np.float64)
 
             with open(frq_path, 'wb') as f:
@@ -1020,7 +1057,7 @@ class UTAUResamplerGUI(ctk.CTk):
                 f.write(struct.pack('d', base_f0))
                 f.write(bytes(16))
                 f.write(struct.pack('i', len(f0)))
-                f.write(frq_data.tobytes())
+                f.write(frq_data.tobytes()) # Vectorized binary dump
                 
             return frq_path
         except Exception as e:
@@ -1164,7 +1201,11 @@ class UTAUResamplerGUI(ctk.CTk):
                         chunk_seg.export(chunk_path, format="wav")
                         chunks.append({"path": chunk_path, "index": len(chunks)})
                 else:
-                    chunks.append({"path": processed_path, "index": 0})
+                    t_chunk = tempfile.NamedTemporaryFile(suffix="_full.wav", dir=self.specific_temp_dir, delete=False)
+                    chunk_path = t_chunk.name
+                    t_chunk.close()
+                    seg.export(chunk_path, format="wav")
+                    chunks.append({"path": chunk_path, "index": 0})
             else:
                 print(f"{CYAN}[ONLY FRQ]{RESET} Skipping chunking for {os.path.basename(audio)}")
                 chunks.append({"path": processed_path, "index": 0})
