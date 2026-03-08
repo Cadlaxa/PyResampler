@@ -11,7 +11,7 @@ import librosa.display
 import pyworld as world
 import soundfile as sf
 import customtkinter as ctk
-import struct, platform, webbrowser, requests, shutil, re, pyglet, ctypes
+import struct, platform, webbrowser, requests, shutil, re, pyglet, ctypes, time
 from tkinterdnd2 import DND_FILES, TkinterDnD
 from pathlib import Path as P
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
@@ -19,8 +19,8 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 base_path = os.path.dirname(os.path.abspath(__file__))
 yaml = YAML()
 yaml.preserve_quotes = True
+YELLOW, GREEN, RED, CYAN, RESET, BOLD = "\033[93m", "\033[92m", "\033[91m", "\033[96m", "\033[0m", "\033[1m"
 
-ctk.set_appearance_mode("Dark")
 ctk.set_default_color_theme("Assets/Theme/orange.json")
 
 ASSETS = P('./Assets')
@@ -67,7 +67,7 @@ class UTAUResamplerGUI(ctk.CTk):
         self.iconbitmap(str(icon_path))
 
         self.title("PyResampler - Batch Resampling GUI")
-        self.version = "0.0.7"
+        self.version = "0.0.8"
         self.config_path = "config.yaml"
         self.yaml = YAML()
         self.audio_files = []
@@ -90,6 +90,10 @@ class UTAUResamplerGUI(ctk.CTk):
         self.speed_var = ctk.DoubleVar(value=0.0)
         self.open_output_var = ctk.BooleanVar(value=False)
         self.wine_path_var = ctk.StringVar(value="")
+        self.playback_process = None
+        self.play_start_time = 0
+        self.current_playhead_sec = 0.0
+        self.is_playing = False
         self.load_config()
 
         self.setup_ui()
@@ -301,6 +305,88 @@ class UTAUResamplerGUI(ctk.CTk):
         except Exception as e:
             print(f"FFmpeg Speed Error: {e}")
             return input_wav
+
+    def toggle_playback(self):
+        if self.is_playing:
+            if self.playback_process:
+                self.playback_process.terminate()
+                self.playback_process = None
+            
+            elapsed = time.time() - self.play_start_time
+            self.current_playhead_sec += elapsed
+            
+            self.is_playing = False
+            self.play_btn.configure(text="Play")
+        else:
+            self.play_audio_ffplay()
+    
+    def play_audio_ffplay(self):
+        if not self.current_editing_path: return
+        if self.playback_process: self.playback_process.terminate()
+
+        if self.current_playhead_sec < self.trim_start or self.current_playhead_sec >= self.trim_end:
+            self.current_playhead_sec = self.trim_start
+
+        cmd = [
+            "ffplay", "-nodisp", "-autoexit", "-infbuf",
+            "-ss", str(self.current_playhead_sec),
+            "-t", str(self.trim_end - self.current_playhead_sec),
+            self.current_editing_path
+        ]
+
+        try:
+            self.playback_process = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            self.is_playing = True
+            
+            self.play_start_time = time.perf_counter() + 0.05 
+            self.play_btn.configure(text="Stop")
+            
+            if hasattr(self, 'playhead_line'):
+                self.playhead_line.set_xdata([self.current_playhead_sec])
+                self.canvas.draw_idle()
+                
+            self._update_playhead_loop()
+        except Exception as e:
+            print(f"Playback failed: {e}")
+
+    def _update_playhead_loop(self):
+        if self.is_playing and self.playback_process and self.playback_process.poll() is None:
+            elapsed = max(0, time.perf_counter() - self.play_start_time)
+            visual_pos = self.current_playhead_sec + elapsed
+
+            if hasattr(self, 'playhead_line'):
+                self.playhead_line.set_xdata([visual_pos])
+                self.canvas.draw_idle()
+
+            if visual_pos >= self.trim_end or visual_pos >= self.duration:
+                self.handle_playback_end()
+                return
+
+            self.after(30, self._update_playhead_loop)
+        else:
+            if self.is_playing:
+                self.handle_playback_end()
+
+    def handle_playback_end(self):
+        if self.playback_process:
+            self.playback_process.terminate()
+            self.playback_process = None
+        
+        self.is_playing = False
+        self.play_btn.configure(text="Play")
+        
+        self.current_playhead_sec = self.trim_start
+        
+        if hasattr(self, 'playhead_line'):
+            self.playhead_line.set_xdata([self.trim_start])
+            self.canvas.draw_idle()
+
+    def stop_audio_ffplay(self):
+        if self.playback_process:
+            self.playback_process.terminate()
+            self.playback_process = None
+        self.is_playing = False
+        self.play_btn.configure(text="Play")
     
     def load_selected_to_trimmer(self, event):
         try:
@@ -332,7 +418,7 @@ class UTAUResamplerGUI(ctk.CTk):
                 'ffprobe', '-v', 'error', '-show_entries', 'format=duration',
                 '-of', 'default=noprint_wrappers=1:nokey=1', file_path
             ]).decode('utf-8').strip()
-            duration = float(probe)
+            self.duration = float(probe)
 
             target_points = 1500
             cmd = [
@@ -346,16 +432,17 @@ class UTAUResamplerGUI(ctk.CTk):
             
             peak = np.max(np.abs(y))
             if peak > 0:
-                margin = 0.8 
+                margin = 0.7 
                 y = (y / peak) * margin
 
-            if len(y) > target_points:
-                y_reshaped = y[:len(y) // target_points * target_points].reshape(target_points, -1)
-                y_solid = np.max(np.abs(y_reshaped), axis=1)
+            if len(y) > 0:
+                x_old = np.linspace(0, self.duration, len(y))
+                x_new = np.linspace(0, self.duration, target_points)
+                y_solid = np.interp(x_new, x_old, np.abs(y))
             else:
-                y_solid = np.abs(y)
+                y_solid = np.zeros(target_points)
 
-            self.after(0, lambda: self._draw_optimized_plot(y_solid, duration, file_path))
+            self.after(0, lambda: self._draw_optimized_plot(y_solid, self.duration, file_path))
             
         except Exception as e:
             print(f"Fast Load failed: {e}")
@@ -363,20 +450,21 @@ class UTAUResamplerGUI(ctk.CTk):
     def _draw_optimized_plot(self, y, duration, file_path):
         self.loading_lbl.destroy()
         
-        fig, ax = plt.subplots(figsize=(8, 2.5), facecolor="#1A1A1A", dpi=80)
+        fig, ax = plt.subplots(figsize=(8, 2), facecolor="#1A1A1A", dpi=80)
+        padding = duration * 0.02
+        ax.set_xlim(-padding, duration + padding)
         ax.fill_between(np.linspace(0, duration, len(y)), y, -y, color="#FF8C42", lw=0)
+        ax.axvspan(-padding, 0, color="#FF8A4296", zorder=0) 
+        ax.axvspan(duration, duration + padding, color="#FF8A4296", zorder=0)
         
-        ax.set_facecolor("#1A1A1A")
-        ax.set_ylim(-1, 1)
-        ax.set_axis_off()
-        fig.tight_layout(pad=0)
+        ax.set_facecolor("#1A1A1A7D")
+        fig.subplots_adjust(left=0, right=1, top=1, bottom=0)
 
         if file_path in self.trim_data:
             self.trim_start, self.trim_end = self.trim_data[file_path]
         else:
             self.trim_start, self.trim_end = 0.0, duration
 
-        # Shrouds at the correct saved positions
         self.shroud_left = ax.axvspan(0, self.trim_start, color="#FF8A423B", alpha=0.6)
         self.shroud_right = ax.axvspan(self.trim_end, duration, color="#FF8A423B", alpha=0.6)
 
@@ -384,14 +472,27 @@ class UTAUResamplerGUI(ctk.CTk):
         self.line_start = ax.axvline(self.trim_start, color='white', lw=2)
         self.line_end = ax.axvline(self.trim_end, color='white', lw=2)
 
-        # Update info label immediately to reflect saved data
-        self.wave_info_label.configure(
-            text=f"Editing: {os.path.basename(file_path)} | Start: {self.trim_start:.2f}s | End: {self.trim_end:.2f}s"
-        )
+        self.current_playhead_sec = 0.0 
+        self.playhead_line = ax.axvline(self.current_playhead_sec, color='red', lw=2, alpha=0.8)
 
-        canvas = FigureCanvasTkAgg(fig, master=self.wave_container)
-        canvas_widget = canvas.get_tk_widget()
-        canvas_widget.pack(fill="both", expand=True)
+        self._update_info_label()
+
+        self.canvas_rounded_frame = ctk.CTkFrame(
+            self.wave_container, 
+            corner_radius=15, 
+            fg_color="#1A1A1A",
+            border_width=0
+        )
+        self.canvas_rounded_frame.pack(fill="both", expand=True, padx=5, pady=5)
+
+        self.canvas = FigureCanvasTkAgg(fig, master=self.canvas_rounded_frame)
+        canvas_widget = self.canvas.get_tk_widget()
+        canvas_widget.configure(
+            highlightthickness=0, 
+            borderwidth=0, 
+            background="#1A1A1A"
+        )
+        canvas_widget.pack(fill="both", expand=True, padx=2, pady=2)
 
         self.active_line = None
 
@@ -403,43 +504,80 @@ class UTAUResamplerGUI(ctk.CTk):
             canvas_widget.config(cursor="sb_h_double_arrow" if (near_start or near_end) else "")
 
             if self.active_line:
-                if self.active_line == "start" and event.xdata < self.trim_end:
-                    self.trim_start = max(0, event.xdata)
+                if self.active_line == "start":
+                    # Lock start between 0 and trim_end
+                    self.trim_start = max(0, min(event.xdata, self.trim_end - 0.01))
                     self.line_start.set_xdata([self.trim_start])
                     self.shroud_left.set_xy([[0, -1], [0, 1], [self.trim_start, 1], [self.trim_start, -1]])
-
-                elif self.active_line == "end" and event.xdata > self.trim_start:
-                    self.trim_end = min(duration, event.xdata)
+                elif self.active_line == "end":
+                    # Lock end between trim_start and duration
+                    self.trim_end = min(duration, max(event.xdata, self.trim_start + 0.01))
                     self.line_end.set_xdata([self.trim_end])
                     self.shroud_right.set_xy([[self.trim_end, -1], [self.trim_end, 1], [duration, 1], [duration, -1]])
                 
-                canvas.draw_idle()
-                self.update_idletasks()
+                self.canvas.draw_idle()
 
-        canvas.mpl_connect('button_press_event', lambda e: self._on_wave_press(e, duration))
-        canvas.mpl_connect('motion_notify_event', on_motion)
-        canvas.mpl_connect('button_release_event', self._on_wave_release)
+        # Bind everything
+        self.canvas.mpl_connect('button_press_event', lambda e: self._on_wave_press(e, duration))
+        self.canvas.mpl_connect('motion_notify_event', on_motion)
+        self.canvas.mpl_connect('button_release_event', self._on_wave_release)
 
     def _on_wave_press(self, event, duration):
         if event.xdata is None: return
-        if abs(event.xdata - self.trim_start) < (duration * 0.03):
+
+        # Check for trim line proximity
+        near_start = abs(event.xdata - self.trim_start) < (duration * 0.03)
+        near_end = abs(event.xdata - self.trim_end) < (duration * 0.03)
+
+        if near_start:
             self.active_line = "start"
-        elif abs(event.xdata - self.trim_end) < (duration * 0.03):
+        elif near_end:
             self.active_line = "end"
+        else:
+            self.active_line = None
+            self.current_playhead_sec = max(0, event.xdata)
+            self.playhead_line.set_xdata([self.current_playhead_sec])
+            
+            if self.is_playing:
+                self.play_audio_ffplay()
+                
+        self.canvas.draw_idle()
 
     def _on_wave_release(self, event):
         self.active_line = None
-        self.wave_info_label.configure(text=f"Editing: {os.path.basename(self.current_editing_path)} | Start: {self.trim_start:.2f}s | End: {self.trim_end:.2f}s")
-
-    def apply_trim(self):
+        self._update_info_label()
         if hasattr(self, 'current_editing_path'):
-            # Save the coordinates to our dictionary
             self.trim_data[self.current_editing_path] = (self.trim_start, self.trim_end)
-            messagebox.showinfo("Trim Applied", 
-                                f"Settings saved for {os.path.basename(self.current_editing_path)}\n"
-                                f"Process will run from {self.trim_start:.2f}s to {self.trim_end:.2f}s")
-        else:
-            messagebox.showwarning("Warning", "No file is currently being edited.")
+    
+    def _update_info_label(self):
+        if not hasattr(self, 'current_editing_path'): return
+        raw_name = os.path.basename(self.current_editing_path)
+        display_name = (raw_name[:22] + "..") if len(raw_name) > 25 else raw_name
+        
+        active_dur = self.trim_end - self.trim_start
+
+        self.wave_info_label.configure(
+            text=f"Editing: {display_name}\n"
+                 f"Start: {self.trim_start:.2f}s | End: {self.trim_end:.2f}s\n"
+                 f"Active Dur: {active_dur:.2f}s"
+        )
+    
+    def reset_trim(self):
+        if not hasattr(self, 'duration'): return
+        
+        self.trim_start = 0.0
+        self.trim_end = self.duration
+        
+        self.line_start.set_xdata([self.trim_start])
+        self.line_end.set_xdata([self.trim_end])
+        
+        self.shroud_left.set_xy([[0, -1], [0, 1], [0, 1], [0, -1]])
+        self.shroud_right.set_xy([[self.duration, -1], [self.duration, 1], [self.duration, 1], [self.duration, -1]])
+        
+        self.trim_data[self.current_editing_path] = (self.trim_start, self.trim_end)
+        
+        self._update_info_label()
+        self.canvas.draw_idle()
 
     def setup_ui(self):
         # Load fonts
@@ -481,7 +619,7 @@ class UTAUResamplerGUI(ctk.CTk):
         btn_frame = ctk.CTkFrame(self.top_frame, fg_color="transparent")
         btn_frame.grid(row=0, column=2, padx=10, pady=10, sticky="n")
         ctk.CTkButton(btn_frame, text="Add Files", width=120, font=self.fontBO, command=self.add_audio_files).pack()
-        ctk.CTkButton(btn_frame, text="Clear", width=120, font=self.fontBO, fg_color="transparent", border_width=1, command=self.clear_audio_files).pack(pady=5)
+        ctk.CTkButton(btn_frame, text="Clear", width=120, font=self.fontBO, command=self.clear_audio_files).pack(pady=5)
         ctk.CTkLabel(self.top_frame, text="Resampler Dir:", font=self.fontBO).grid(row=1, column=0, padx=10, pady=5, sticky="w")
 
         self.resampler_entry = ctk.CTkEntry(self.top_frame, font=self.fontME, textvariable=self.resampler_dir_var)
@@ -599,9 +737,15 @@ class UTAUResamplerGUI(ctk.CTk):
         # Buttons to save settings
         self.wave_btn_frame = ctk.CTkFrame(self.wave_tab, fg_color="transparent")
         self.wave_btn_frame.pack(fill="x", pady=5)
+        self.wave_btn_frame.columnconfigure(0, weight=2)
+        self.wave_btn_frame.columnconfigure(1, weight=0)
+        self.wave_btn_frame.columnconfigure(2, weight=1)
 
-        ctk.CTkLabel(self.wave_btn_frame, text="*Note: go back to the batches tab to render in batches", font=self.fontBO).pack(side="left", padx=10)
-        ctk.CTkButton(self.wave_btn_frame, text="Apply Trimming", font=self.fontBO, command=self.apply_trim).pack(side="right", padx=10)
+        ctk.CTkLabel(self.wave_btn_frame, text="*Note: go back to the batches tab to render in batches", font=self.fontBO).grid(sticky="w", padx=10)
+        self.play_btn = ctk.CTkButton(self.wave_btn_frame, text="Play", font=self.fontBO, width=70, command=self.toggle_playback)
+        self.play_btn.grid(sticky="e", row=0, column=1, padx=5)
+        self.reset_trim_bt = ctk.CTkButton(self.wave_btn_frame, text="Reset Trimming", font=self.fontBO, command=self.reset_trim)
+        self.reset_trim_bt.grid(sticky="we", row=0, column=2, padx=5)
 
         self.progress_bar = ctk.CTkProgressBar(self.main_container1)
         self.progress_bar.pack(fill="x", padx=20, pady=(0, 10))
@@ -711,7 +855,7 @@ class UTAUResamplerGUI(ctk.CTk):
             # NORMAL STATE
             self.pitch_entry.configure(
                 state="normal", 
-                text_color="white", 
+                text_color=ctk.ThemeManager.theme["CTkEntry"]["text_color"], 
             )
             saved_pitch = self.config.get("pitch_note", "C4")
             if "Auto" in str(saved_pitch):
@@ -855,24 +999,33 @@ class UTAUResamplerGUI(ctk.CTk):
     def generate_harvest_frq(self, input_wav, target_out=None):
         try:
             x, fs = sf.read(input_wav)
-            if x.ndim > 1: x = x[:, 0]
+            if x.ndim > 1: x = np.mean(x, axis=1)
             hop = 256
-            f0, t = world.harvest(x, fs, f0_ceil=880, frame_period=1000*hop/fs)
-            sp = world.cheaptrick(x, f0, t, fs)
-            amp = np.mean(np.sqrt(sp), axis=1)
-            base_f0 = np.median(f0[f0 > 0]) if any(f0 > 0) else 440.0
+            f0, t = world.harvest(x, fs, f0_ceil=1100, frame_period=1000 * hop / fs)
+            window_size = hop * 2
+            energy = np.array([
+                np.sqrt(np.mean(x[int(ti*fs) : int(ti*fs) + window_size]**2)) 
+                if int(ti*fs) < len(x) else 0 
+                for ti in t
+            ])
             
-            frq_path = os.path.splitext(target_out if target_out else input_wav)[0] + "_wav.frq"
+            base_f0 = np.median(f0[f0 > 0]) if np.any(f0 > 0) else 440.0
+            frq_path = os.path.splitext(target_out if target_out else input_wav)[0] + "_wav" + ".frq"
+            
+            frq_data = np.stack((f0, energy), axis=-1).astype(np.float64)
+
             with open(frq_path, 'wb') as f:
                 f.write(b'FREQ0003')
                 f.write(struct.pack('i', hop))
                 f.write(struct.pack('d', base_f0))
                 f.write(bytes(16))
-                f.write(struct.pack('i', f0.shape[0]))
-                for i in range(f0.shape[0]):
-                    f.write(struct.pack('2d', f0[i], amp[i]))
+                f.write(struct.pack('i', len(f0)))
+                f.write(frq_data.tobytes())
+                
             return frq_path
-        except: return None
+        except Exception as e:
+            print(f"Error generating FRQ: {e}")
+            return None
 
     # Processing Thread 
     def run_process_thread(self):
@@ -1131,9 +1284,6 @@ class UTAUResamplerGUI(ctk.CTk):
             self.after(0, lambda v=progress_value: self.progress_bar.set(v))
 
     def run_resampler(self, t):
-
-        # ANSI Color Codes
-        YELLOW, GREEN, RED, CYAN, RESET, BOLD = "\033[93m", "\033[92m", "\033[91m", "\033[96m", "\033[0m", "\033[1m"
         current_os = platform.system()
         
         try:
