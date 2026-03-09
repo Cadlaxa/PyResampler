@@ -48,7 +48,7 @@ Python GUI toolkit for passing down Resampler arguments (single and batch resamp
 <img width="666" height="340" alt="image" src="https://github.com/user-attachments/assets/3e63582e-b5c2-4b8e-949b-34740d9b38b9" />
 
 - Settings
-  - `Themes`: light and dark theme
+  - `Themes`: light, dark, and system theme
   - `Wine path`: click the `Detect` button to automatically find the wine path (usable for macos and linux)
   - `Open button`: if the wine path detector fails, you can click this to manually find the wine path banaries
   - `Open Output`: Opens the output folder after rendering the input files
