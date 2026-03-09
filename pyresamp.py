@@ -1306,13 +1306,18 @@ class UTAUResamplerGUI(ctk.CTk):
         
         try:
             if t.get("only_frq"):
-                print(f"{CYAN}[ONLY FRQ MODE]{RESET} Analyzing {os.path.basename(t['audio_in'])}...")
-                base_name = os.path.splitext(os.path.basename(t["original_path"]))[0]
-                final_frq_path = os.path.join(self.output_dir_var.get(), f"{base_name}.wav")
-                self.generate_harvest_frq(t["audio_in"], target_out=final_frq_path)
+                audio_input = t["audio_in"]
+                original_name = os.path.basename(t.get("original_path", audio_input))
+                base_name = os.path.splitext(original_name)[0]
                 
-                print(f"{GREEN}[SUCCESS] FRQ Saved to:{RESET} {self.output_dir_var.get()}")
-                self.tick_progress()
+                print(f"{CYAN}{BOLD}[ONLY FRQ MODE]{RESET} Analyzing {original_name}...")
+                output_base = os.path.join(self.output_dir_var.get(), base_name)
+                success_path = generate_harvest_frq(audio_input, target_out=output_base)
+                if success_path:
+                    print(f"{GREEN}[SUCCESS]{RESET} FRQ Saved to: {os.path.basename(success_path)}")
+                else:
+                    print(f"{RED}[ERROR]{RESET} Failed to generate FRQ for {original_name}")
+                self.after(0, self.tick_progress)
                 return
             
             processed_input = t["audio_in"] 
