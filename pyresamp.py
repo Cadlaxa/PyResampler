@@ -1,4 +1,5 @@
 import os, sys, subprocess, threading
+import concurrent.futures
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -15,6 +16,7 @@ import struct, platform, webbrowser, requests, shutil, re, pyglet, ctypes, time
 from tkinterdnd2 import DND_FILES, TkinterDnD
 from pathlib import Path as P
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from Assets.harvest_frq import generate_harvest_frq
 
 base_path = os.path.dirname(os.path.abspath(__file__))
 yaml = YAML()
@@ -38,7 +40,7 @@ def setup_ffmpeg():
     
     folder_name = os_map.get(current_os)
     if not folder_name:
-        print(f"[{current_os}] OS not recognized for local bundling.")
+        print(f"{YELLOW}{BOLD}[{current_os}]{RESET} OS not recognized for local bundling.")
         return
 
     ffmpeg_folder = os.path.join(base_path, folder_name)
@@ -53,11 +55,9 @@ def setup_ffmpeg():
                     st = os.stat(bin_path)
                     os.chmod(bin_path, st.st_mode | os.stat.S_IEXEC)
         
-        print(f"[{current_os}] FFmpeg loaded from: {ffmpeg_folder}")
+        print(f"{YELLOW}{BOLD}[{current_os}]{RESET} FFmpeg loaded from: {ffmpeg_folder}")
     else:
-        print(f"[{current_os}] Folder {folder_name} missing. Using system default.\n")
-setup_ffmpeg()
-from pydub import AudioSegment
+        print(f"{GREEN}{BOLD}[{current_os}]{RESET} Folder {folder_name} missing. Using system default.\n")
 
 class UTAUResamplerGUI(ctk.CTk):
     def __init__(self):
@@ -67,7 +67,7 @@ class UTAUResamplerGUI(ctk.CTk):
         self.iconbitmap(str(icon_path))
 
         self.title("PyResampler - Batch Resampling GUI")
-        self.version = "0.0.8"
+        self.version = "0.0.9"
         self.config_path = "config.yaml"
         self.yaml = YAML()
         self.audio_files = []
@@ -82,7 +82,10 @@ class UTAUResamplerGUI(ctk.CTk):
         self.pitch_note_var = ctk.StringVar(value="C4")
         self.volume_var = ctk.StringVar(value="100")
         self.modulation_var = ctk.StringVar(value="100")
-        self.threads_var = ctk.StringVar(value="4")
+        total_cores = os.cpu_count() or 1
+        half_cores = max(1, total_cores // 2)
+        self.thread_options = [str(i) for i in range(1, total_cores + 1)]
+        self.threads_var = ctk.StringVar(value=str(half_cores))
         self.gen_spec_var = ctk.BooleanVar(value=False)
         self.generate_frq_var = ctk.BooleanVar(value=False)
         self.only_frq_var = ctk.BooleanVar(value=False)
@@ -651,7 +654,7 @@ class UTAUResamplerGUI(ctk.CTk):
         self.param_frame.grid_columnconfigure((0, 1, 2, 3), weight=1)
 
         # Title: Center aligned across all columns
-        ctk.CTkLabel(self.param_frame, text="Processing Parameters", font=self.title).grid(
+        ctk.CTkLabel(self.param_frame, text="Processing Parameters:", font=self.title).grid(
             row=0, column=0, columnspan=7, pady=10, sticky="ew"
         )
 
@@ -663,7 +666,8 @@ class UTAUResamplerGUI(ctk.CTk):
         ctk.CTkEntry(self.param_frame, textvariable=self.flags_var, width=140).grid(row=1, column=1, padx=5, pady=5, sticky="w")
 
         ctk.CTkLabel(self.param_frame, text="Threads:", font=self.fontBO).grid(row=1, column=2, padx=5, pady=5, sticky="e")
-        ctk.CTkEntry(self.param_frame, textvariable=self.threads_var, width=140).grid(row=1, column=3, padx=5, pady=5, sticky="w")
+        self.thread_menu = ctk.CTkOptionMenu(self.param_frame, variable=self.threads_var, values=self.thread_options, width=140)
+        self.thread_menu.grid(row=1, column=3, padx=5, pady=5, sticky="w")
 
         # Add this in your UI initialization section
         self.clear_cache_btn = ctk.CTkButton(
@@ -1004,65 +1008,35 @@ class UTAUResamplerGUI(ctk.CTk):
             plt.close(fig) 
         except Exception as e:
             print(f"Spectrogram Error: {e}")
-
-    def _calculate_base_frq(self, f0, f0_ceil):
-        n = len(f0)
-        if n < 2:
-            return np.median(f0) if n > 0 else 440.0
-        
-        avg_frq = 0
-        tally = 0
-        f0_floor = world.default_f0_floor
-
-        # Filter f0 to valid range before weighing
-        for i in range(n):
-            if f0_floor <= f0[i] <= f0_ceil:
-                if i < 1:
-                    q = f0[i+1] - f0[i]
-                elif i == n - 1:
-                    q = f0[i] - f0[i-1]
-                else:
-                    q = (f0[i+1] - f0[i-1]) / 2
-                
-                # Use Gaussian-like weighting: smoother pitch gets higher priority
-                weight = 2 ** (-q * q)
-                avg_frq += f0[i] * weight
-                tally += weight
-
-        return (avg_frq / tally) if tally > 0 else 440.0
-
-    def generate_harvest_frq(self, input_wav, target_out=None):
+    
+    def run_parallel_frq_generation(self, chunk_paths):
         try:
-            x, fs = sf.read(input_wav)
-            if x.ndim > 1: x = np.mean(x, axis=1)
-            
-            hop = 256
-            f0_ceil = 1100
-            
-            f0, t = world.harvest(x, fs, f0_ceil=f0_ceil, frame_period=1000 * hop / fs)
-            window_size = hop * 2
-            energy = np.array([
-                np.sqrt(np.mean(x[int(ti*fs) : int(ti*fs) + window_size]**2)) 
-                if int(ti*fs) < len(x) else 0 
-                for ti in t
-            ])
-            
-            base_f0 = self._calculate_base_frq(f0, f0_ceil)
-            frq_path = os.path.splitext(target_out if target_out else input_wav)[0] + "_wav.frq"
-            frq_data = np.stack((f0, energy), axis=-1).astype(np.float64)
+            try:
+                num_threads = int(self.threads_var.get())
+            except (ValueError, TypeError):
+                num_threads = 0
+            max_workers = os.cpu_count() if num_threads <= 0 else num_threads
 
-            with open(frq_path, 'wb') as f:
-                f.write(b'FREQ0003')
-                f.write(struct.pack('i', hop))
-                f.write(struct.pack('d', base_f0))
-                f.write(bytes(16))
-                f.write(struct.pack('i', len(f0)))
-                f.write(frq_data.tobytes()) # Vectorized binary dump
+            print(f"{CYAN}{BOLD}[PARALLEL]{RESET} Distributing {len(chunk_paths)} tasks to {max_workers} cores...")
+
+            with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
+                future_to_file = {
+                    executor.submit(generate_harvest_frq, path): os.path.basename(path) 
+                    for path in chunk_paths
+                }
                 
-            return frq_path
+                for future in concurrent.futures.as_completed(future_to_file):
+                    filename = future_to_file[future]
+                    try:
+                        result = future.result()
+                        if result:
+                            print(f"  {GREEN}>> Finished:{RESET} {filename}")
+                            self.after(0, self.tick_progress)
+                    except Exception as e:
+                        print(f"  {RED}>> Failed:{RESET} {filename} | Error: {e}")
+                        
         except Exception as e:
-            print(f"Error generating FRQ: {e}")
-            return None
+            print(f"{RED}[CRITICAL]{RESET} Parallel setup failed: {e}")
 
     # Processing Thread 
     def run_process_thread(self):
@@ -1175,6 +1149,7 @@ class UTAUResamplerGUI(ctk.CTk):
         chunk_map = {}
         max_chunk_sec = 30.0
         min_chunk_ms = 200
+        all_chunks_to_process = []
 
         for audio, processed_path in temp_map.items():
             chunks = []
@@ -1217,10 +1192,12 @@ class UTAUResamplerGUI(ctk.CTk):
                 print(f"\n{CYAN}{BOLD}[PYIN]{RESET} Analyzing segments for {os.path.basename(audio)}...")
                 for c in chunks:
                     chunk_name = os.path.basename(c["path"])
-                    print(f"  {CYAN}>> Generating FRQ for:{RESET} {chunk_name}")
-                    
-                    self.generate_harvest_frq(c["path"])
-                    self.tick_progress()
+                    #print(f"  {CYAN}>> Generating FRQ for:{RESET} {chunk_name}")
+                    all_chunks_to_process.append(c["path"])
+
+        if self.generate_frq_var.get() and all_chunks_to_process:
+            print(f"{CYAN}{BOLD}[BATCH]{RESET} Starting parallel FRQ generation for {len(all_chunks_to_process)} segments...")
+            self.run_parallel_frq_generation(all_chunks_to_process)
 
         # STAGE 3: Multi-Resampler Rendering
         print(f"\n{BLUE}{BOLD}=== STAGE 3: RENDERING WITH RESAMPLERS ==={RESET}")
@@ -1521,5 +1498,8 @@ class UTAUResamplerGUI(ctk.CTk):
             messagebox.showerror("Processing Errors", f"Completed with errors:\n\n{error_msg}")
 
 if __name__ == "__main__":
+    setup_ffmpeg()
+    from pydub import AudioSegment
+
     app = UTAUResamplerGUI()
     app.mainloop()
