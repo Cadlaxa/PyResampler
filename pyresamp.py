@@ -67,7 +67,7 @@ class UTAUResamplerGUI(ctk.CTk):
         self.iconbitmap(str(icon_path))
 
         self.title("PyResampler - Batch Resampling GUI")
-        self.version = "0.1.1"
+        self.version = "0.1.2"
         self.config_path = "config.yaml"
         self.yaml = YAML()
         self.yaml.preserve_quotes = True
@@ -88,7 +88,7 @@ class UTAUResamplerGUI(ctk.CTk):
         self.thread_options = [str(i) for i in range(1, total_cores + 1)]
         self.threads_var = ctk.StringVar(value=str(half_cores))
         self.gen_spec_var = ctk.BooleanVar(value=False)
-        self.generate_frq_var = ctk.BooleanVar(value=False)
+        self.generate_frq_var = ctk.BooleanVar(value=True)
         self.only_frq_var = ctk.BooleanVar(value=False)
         self.follow_pitch_var = ctk.BooleanVar(value=False)
         self.speed_var = ctk.DoubleVar(value=0.0)
@@ -179,7 +179,7 @@ class UTAUResamplerGUI(ctk.CTk):
 
         self.follow_pitch_var.set(self.config.get("follow_pitch", False))
         self.gen_spec_var.set(self.config.get("generate_spectrogram", False))
-        self.generate_frq_var.set(self.config.get("generate_frq", False))
+        self.generate_frq_var.set(self.config.get("generate_frq", True))
         self.only_frq_var.set(self.config.get("only_frq", False))
         
         self.volume_var.set(str(self.config.get("volume", "100")))
@@ -1095,6 +1095,7 @@ class UTAUResamplerGUI(ctk.CTk):
         if self.start_btn.cget("state") == "disabled":
             return
         self.start_btn.configure(state="disabled", text="PROCESSING...")
+        self.update_idletasks()
         threading.Thread(target=self.execute_resampling, daemon=True).start()
 
     def execute_resampling(self):
@@ -1102,7 +1103,6 @@ class UTAUResamplerGUI(ctk.CTk):
             self.after(0, lambda: messagebox.showerror("Error", "Missing files or output directory"))
             self.after(0, lambda: self.start_btn.configure(state="normal", text="START RESAMPLING"))
             return
-        self.update_idletasks()
         self.start_btn.configure(state="disabled", text="PROCESSING...")
         errors = []
 
