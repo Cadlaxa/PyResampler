@@ -9,3 +9,4 @@ pydub
 requests
 tkinterdnd2
 pyglet
+onnxruntime

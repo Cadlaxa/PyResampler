@@ -212,3 +212,4 @@ resamplers/
 cache_temp/
 output/
 config.yaml
+config.yaml.tmp

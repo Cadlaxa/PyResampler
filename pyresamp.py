@@ -16,11 +16,11 @@ import struct, platform, webbrowser, requests, shutil, re, pyglet, ctypes, time
 from tkinterdnd2 import DND_FILES, TkinterDnD
 from pathlib import Path as P
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-from Assets.harvest_frq import generate_harvest_frq
+from Assets.harvest_frq import generate_harvest_frq, slice_master_frq
+from Assets.vocoder_inference import run_onnx_inference
+
 
 base_path = os.path.dirname(os.path.abspath(__file__))
-yaml = YAML()
-yaml.preserve_quotes = True
 YELLOW, GREEN, RED, CYAN, RESET, BOLD = "\033[93m", "\033[92m", "\033[91m", "\033[96m", "\033[0m", "\033[1m"
 
 ctk.set_default_color_theme("Assets/Theme/orange.json")
@@ -67,9 +67,10 @@ class UTAUResamplerGUI(ctk.CTk):
         self.iconbitmap(str(icon_path))
 
         self.title("PyResampler - Batch Resampling GUI")
-        self.version = "0.0.9"
+        self.version = "0.1.1"
         self.config_path = "config.yaml"
         self.yaml = YAML()
+        self.yaml.preserve_quotes = True
         self.audio_files = []
         self.batch_checkboxes = {}
         self.geometry("700x600")
@@ -164,12 +165,14 @@ class UTAUResamplerGUI(ctk.CTk):
     def load_config(self):
         if os.path.exists(self.config_path):
             try:
-                with open(self.config_path, 'r') as f:
-                    # Using 'or {}' ensures it's never None
+                with open(self.config_path, 'r', encoding='utf-8') as f:
+                    # Allow duplicates so we can read/fix a messy file
+                    self.yaml.allow_duplicate_keys = True
                     data = self.yaml.load(f)
-                    self.config = data if data is not None else {}
+                    if data:
+                        self.config = data
             except Exception as e:
-                print(f"Error: {e}")
+                print(f"[ERROR] Loading config: {e}")
                 self.config = {}
         else:
             self.config = {}
@@ -191,16 +194,13 @@ class UTAUResamplerGUI(ctk.CTk):
         self.resampler_dir_var = ctk.StringVar(value=self.config.get("resampler_directory", ""))
         self.output_dir_var = ctk.StringVar(value=self.config.get("output_directory", ""))
         self.resampler_var = ctk.StringVar(value=self.config.get("default_resampler", ""))
+        self.config.setdefault("resampler_categ", {"uses_frq": [], "uses_own_f0": []})
         return self.config
 
     def save_config(self, key=None, value=None):
-        if self.config is None:
-            self.config = {}
-
         if key is not None:
             self.config[key] = value
 
-        # Sync all GUI variables into the config dictionary
         gui_settings = {
             "follow_pitch": self.follow_pitch_var.get(),
             "volume": self.volume_var.get(),
@@ -217,15 +217,30 @@ class UTAUResamplerGUI(ctk.CTk):
             "open_output": self.open_output_var.get(),
             "wine_path": self.wine_path_var.get()
         }
+        
         self.config.update(gui_settings)
+        self.config.setdefault("resampler_categ", {"uses_frq": [], "uses_own_f0": []})
+        temp_path = self.config_path + ".tmp"
 
-        try:
-            with open(self.config_path, 'w') as f:
-                self.yaml.dump(self.config, f)
-        except PermissionError:
-            print("\033[91m[ERROR] Config.yaml is locked/open in another app!\033[0m")
-        except Exception as e:
-            print(f"\033[91m[ERROR] Save failed: {e}\033[0m")
+        max_retries = 5
+        for attempt in range(max_retries):
+            try:
+                with open(temp_path, 'w', encoding='utf-8') as f:
+                    self.yaml.dump(self.config, f)
+                
+                if os.path.exists(temp_path):
+                    os.replace(temp_path, self.config_path)
+                break 
+                
+            except PermissionError:
+                if attempt < max_retries - 1:
+                    time.sleep(0.1)
+                    continue
+                print("\033[91m[ERROR] Config.yaml is permanently locked!\033[0m")
+            except Exception as e:
+                print(f"\033[91m[ERROR] Atomic save failed: {e}\033[0m")
+                if os.path.exists(temp_path): os.remove(temp_path)
+                break
         
     def change_theme_event(self, new_theme: str):
         ctk.set_appearance_mode(new_theme)
@@ -874,7 +889,7 @@ class UTAUResamplerGUI(ctk.CTk):
         if os.path.isdir(base_dir):
             for root, dirs, files in os.walk(base_dir):
                 for file in files:
-                    if file.lower().endswith((".exe", ".bat")):
+                    if file.lower().endswith((".exe", ".bat", ".onnx")):
                         full_path = os.path.join(root, file)
                         relative_path = os.path.relpath(full_path, base_dir)
                         resampler_list.append(relative_path)
@@ -971,26 +986,28 @@ class UTAUResamplerGUI(ctk.CTk):
 
     def detect_pitch(self, audio_path):
         try:
-            y, sr = librosa.load(audio_path, sr=22050, duration=1.0)
-            y_trimmed, _ = librosa.effects.trim(y, top_db=25)
-            if len(y_trimmed) < 100: return "C4"
-
+            y, sr = librosa.load(audio_path, sr=22050, duration=5.0)
+            y_trimmed, _ = librosa.effects.trim(y, top_db=30)
+            if len(y_trimmed) < sr * 0.1: 
+                return "C4"
+            y_analysis = y_trimmed[:int(sr * 1.5)]
             f0, voiced_flag, voiced_probs = librosa.pyin(
-                y_trimmed, 
+                y_analysis, 
                 fmin=librosa.note_to_hz('C2'), 
                 fmax=librosa.note_to_hz('C6'),
-                fill_na=None
+                sr=sr,
+                fill_na=np.nan 
             )
-
-            f0_clean = f0[voiced_flag]
+            valid_f0 = f0[voiced_flag & ~np.isnan(f0)]
             
-            if len(f0_clean) > 0:
-                avg_f0 = np.median(f0_clean)
+            if len(valid_f0) > 0:
+                avg_f0 = np.median(valid_f0)
                 midi_note = int(round(librosa.hz_to_midi(avg_f0)))
                 note = librosa.midi_to_note(midi_note)
                 return note.replace('♯', '#').replace('♭', 'b')
+                
         except Exception as e:
-            print(f"Pitch detection failed: {e}")
+            print(f"    \033[91m[ERROR]\033[0m Pitch detection failed for {os.path.basename(audio_path)}: {e}")
         return "C4"
 
     def save_spectrogram(self, audio_path):
@@ -1009,7 +1026,42 @@ class UTAUResamplerGUI(ctk.CTk):
         except Exception as e:
             print(f"Spectrogram Error: {e}")
     
-    def run_parallel_frq_generation(self, chunk_paths):
+    def get_adjusted_chunk_pitch(self, chunk_frq_path, target_pitch_name):
+        # Mathematically adjusts the target note for a specific chunk so the 
+        # global melody is preserved when non frq resamplers shift it.
+        
+        try:
+            with open(chunk_frq_path, 'rb') as f:
+                header = f.read(40)
+                global_f0 = struct.unpack('d', header[12:20])[0]
+                data = f.read()
+                frames = struct.unpack('<' + 'd' * (len(data) // 16 * 2), data)
+                f0_raw = np.array(frames[0::2], dtype=np.float64)
+
+            valid_f0 = f0_raw[f0_raw > 0]
+            if len(valid_f0) == 0 or global_f0 <= 0:
+                return target_pitch_name
+
+            local_f0 = np.median(valid_f0)
+
+            notes = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+            name_part = target_pitch_name[:-1].replace('Db', 'C#').replace('Eb', 'D#').replace('Gb', 'F#').replace('Ab', 'G#').replace('Bb', 'A#')
+            octave = int(target_pitch_name[-1])
+            n = notes.index(name_part)
+            target_hz = 440.0 * (2.0 ** ((n + (octave - 4) * 12 - 9) / 12.0))
+
+            shift_ratio = target_hz / global_f0
+            new_target_hz = local_f0 * shift_ratio
+
+            midi_val = int(round(12 * np.log2(new_target_hz / 440.0) + 69))
+            new_octave = midi_val // 12 - 1
+            new_note = notes[midi_val % 12] + str(new_octave)
+
+            return new_note
+        except Exception as e:
+            return target_pitch_name
+    
+    def run_parallel_frq_generation(self, slice_tasks):
         try:
             try:
                 num_threads = int(self.threads_var.get())
@@ -1017,12 +1069,12 @@ class UTAUResamplerGUI(ctk.CTk):
                 num_threads = 0
             max_workers = os.cpu_count() if num_threads <= 0 else num_threads
 
-            print(f"{CYAN}{BOLD}[PARALLEL]{RESET} Distributing {len(chunk_paths)} tasks to {max_workers} cores...")
+            print(f"{CYAN}{BOLD}[PARALLEL]{RESET} Slicing {len(slice_tasks)} FRQs across {max_workers} cores...")
 
             with concurrent.futures.ProcessPoolExecutor(max_workers=max_workers) as executor:
                 future_to_file = {
-                    executor.submit(generate_harvest_frq, path): os.path.basename(path) 
-                    for path in chunk_paths
+                    executor.submit(slice_master_frq, task['master'], task['chunk'], task['start_ms']): os.path.basename(task['chunk']) 
+                    for task in slice_tasks
                 }
                 
                 for future in concurrent.futures.as_completed(future_to_file):
@@ -1030,7 +1082,7 @@ class UTAUResamplerGUI(ctk.CTk):
                     try:
                         result = future.result()
                         if result:
-                            print(f"  {GREEN}>> Finished:{RESET} {filename}")
+                            print(f"  {GREEN}>> Sliced:{RESET} {filename}")
                             self.after(0, self.tick_progress)
                     except Exception as e:
                         print(f"  {RED}>> Failed:{RESET} {filename} | Error: {e}")
@@ -1050,7 +1102,7 @@ class UTAUResamplerGUI(ctk.CTk):
             self.after(0, lambda: messagebox.showerror("Error", "Missing files or output directory"))
             self.after(0, lambda: self.start_btn.configure(state="normal", text="START RESAMPLING"))
             return
-        
+        self.update_idletasks()
         self.start_btn.configure(state="disabled", text="PROCESSING...")
         errors = []
 
@@ -1090,6 +1142,7 @@ class UTAUResamplerGUI(ctk.CTk):
 
         temp_map = {}
         pitch_map = {}
+        master_frq_map = {}
         os.makedirs(self.specific_temp_dir, exist_ok=True)
 
         # STAGE 1: Normalization & Global FRQ (Run once per file)
@@ -1139,6 +1192,10 @@ class UTAUResamplerGUI(ctk.CTk):
                 if processed_path != temp_map[audio]:
                     os.remove(temp_map[audio])
                 
+                if self.generate_frq_var.get():
+                    print(f"  {CYAN}>> Generating Master FRQ (This takes a moment)...{RESET}")
+                    master_frq_map[audio] = generate_harvest_frq(processed_path, user_threads=self.threads_var.get())
+                
                 temp_map[audio] = processed_path
                 #print(f"{GREEN}[PREP DONE]{RESET} {os.path.basename(audio)} (Speed: {multiplier:.2f}x)")
 
@@ -1147,8 +1204,9 @@ class UTAUResamplerGUI(ctk.CTk):
         
         print(f"\n{BLUE}{BOLD}=== STAGE 2: CHUNKING ==={RESET}")
         chunk_map = {}
-        max_chunk_sec = 30.0
+        self.max_chunk_sec = 20.0
         min_chunk_ms = 200
+        pad_ms = 1000
         all_chunks_to_process = []
 
         for audio, processed_path in temp_map.items():
@@ -1156,51 +1214,70 @@ class UTAUResamplerGUI(ctk.CTk):
 
             if not self.only_frq_var.get():
                 seg = AudioSegment.from_wav(processed_path)
-                total_duration = seg.duration_seconds
+                total_duration_ms = int(seg.duration_seconds * 1000)
 
-                if total_duration > max_chunk_sec:
-                    print(f"{YELLOW}[CHUNKING]{RESET} {os.path.basename(audio)} ({total_duration:.2f}s)")
-                    for start_sec in range(0, int(total_duration), int(max_chunk_sec)):
-                        end_sec = min(start_sec + max_chunk_sec, total_duration)
+                if total_duration_ms > self.max_chunk_sec * 1000:
+                    print(f"{YELLOW}[CHUNKING]{RESET} {os.path.basename(audio)} ({seg.duration_seconds:.2f}s)")
+                    
+                    target_chunk_ms = int(self.max_chunk_sec * 1000)
+                    
+                    for start_ms in range(0, total_duration_ms, target_chunk_ms):
+                        end_ms = min(start_ms + target_chunk_ms, total_duration_ms)
                         
-                        # Merge tiny trailing chunks
-                        if total_duration - start_sec < (min_chunk_ms / 1000) and start_sec > 0:
-                            continue
-                        if start_sec + (max_chunk_sec * 1.5) > total_duration:
-                            end_sec = total_duration
+                        if total_duration_ms - start_ms < min_chunk_ms and start_ms > 0:
+                            break 
+                        
+                        absorbed_tail = False
+                        if start_ms + int(target_chunk_ms * 1.5) >= total_duration_ms:
+                            end_ms = total_duration_ms
+                            absorbed_tail = True
 
-                        chunk_seg = seg[start_sec*1000 : end_sec*1000]
-                        t_chunk = tempfile.NamedTemporaryFile(suffix=f"_part{start_sec}.wav", dir=self.specific_temp_dir, delete=False)
+                        padded_start_ms = max(0, start_ms - pad_ms)
+                        padded_end_ms = min(end_ms + pad_ms, total_duration_ms)
+
+                        chunk_seg = seg[padded_start_ms : padded_end_ms]
+                        t_chunk = tempfile.NamedTemporaryFile(suffix=f"_part{start_ms//1000}.wav", dir=self.specific_temp_dir, delete=False)
                         chunk_path = t_chunk.name
                         t_chunk.close()
                         chunk_seg.export(chunk_path, format="wav")
-                        chunks.append({"path": chunk_path, "index": len(chunks)})
+                        
+                        chunks.append({
+                            "path": chunk_path, 
+                            "index": len(chunks), 
+                            "start_ms": padded_start_ms,  
+                            "trim_left": start_ms - padded_start_ms,
+                            "trim_right": padded_end_ms - end_ms
+                        })
+
+                        if absorbed_tail:
+                            break
                 else:
                     t_chunk = tempfile.NamedTemporaryFile(suffix="_full.wav", dir=self.specific_temp_dir, delete=False)
                     chunk_path = t_chunk.name
                     t_chunk.close()
                     seg.export(chunk_path, format="wav")
-                    chunks.append({"path": chunk_path, "index": 0})
+                    
+                    chunks.append({"path": chunk_path, "index": 0, "start_ms": 0.0, "trim_left": 0, "trim_right": 0})
             else:
                 print(f"{CYAN}[ONLY FRQ]{RESET} Skipping chunking for {os.path.basename(audio)}")
-                chunks.append({"path": processed_path, "index": 0})
+                chunks.append({"path": processed_path, "index": 0, "start_ms": 0.0})
             
             chunk_map[audio] = chunks
 
-            # Harvest FRQ (once per file)
             if self.generate_frq_var.get():
-                print(f"\n{CYAN}{BOLD}[PYIN]{RESET} Analyzing segments for {os.path.basename(audio)}...")
                 for c in chunks:
-                    chunk_name = os.path.basename(c["path"])
-                    #print(f"  {CYAN}>> Generating FRQ for:{RESET} {chunk_name}")
-                    all_chunks_to_process.append(c["path"])
+                    all_chunks_to_process.append({
+                        'master': master_frq_map[audio],
+                        'chunk': c["path"],
+                        'start_ms': c["start_ms"]
+                    })
 
         if self.generate_frq_var.get() and all_chunks_to_process:
             print(f"{CYAN}{BOLD}[BATCH]{RESET} Starting parallel FRQ generation for {len(all_chunks_to_process)} segments...")
             self.run_parallel_frq_generation(all_chunks_to_process)
 
         # STAGE 3: Multi-Resampler Rendering
-        print(f"\n{BLUE}{BOLD}=== STAGE 3: RENDERING WITH RESAMPLERS ==={RESET}")
+        print(f"\n{BLUE}{BOLD}=== STAGE 3: RENDERING/INFERENCING ==={RESET}")
         tasks = []
         for audio, chunks in chunk_map.items():
             if audio not in temp_map: continue
@@ -1244,14 +1321,34 @@ class UTAUResamplerGUI(ctk.CTk):
         # STAGE 4: STITCHING & FINAL CLEANUP
         if not self.only_frq_var.get():
             print(f"\n{BLUE}{BOLD}=== STAGE 4: STITCHING & CLEANUP ==={RESET}")
+            self.load_config()
+            uses_own_f0_list = self.config.get("resampler_categ", {}).get("uses_own_f0", [])
             for audio, chunks in chunk_map.items():
+                target_note = pitch_map[audio] 
+
                 for res_path in resamplers:
-                    res_name = os.path.splitext(os.path.basename(res_path))[0]
+                    res_full_name = os.path.basename(res_path)
+                    res_name = os.path.splitext(res_full_name)[0]
                     base_name = os.path.splitext(os.path.basename(audio))[0]
+
+                    is_own_f0 = res_full_name in uses_own_f0_list
+                    needs_correction = is_own_f0 and len(chunks) > 1
                     
-                    parts = [os.path.join(self.specific_temp_dir, f"{base_name}_{res_name}_part{i}.wav") 
-                            for i in range(len(chunks))]
-                    final_stitched_path = self.stitch_chunks(audio, res_name, parts)
+                    parts_data = []
+                    for i, c in enumerate(chunks):
+                        part_path = os.path.join(self.specific_temp_dir, f"{base_name}_{res_name}_part{i}.wav")
+                        print(f"    >> Queuing: {os.path.basename(part_path)}")
+                        
+                        if needs_correction and os.path.exists(part_path):
+                            self.correct_chunk_pitch(part_path, target_note)
+                        
+                        parts_data.append({
+                            "path": part_path,
+                            "trim_left": c.get("trim_left", 0),
+                            "trim_right": c.get("trim_right", 0)
+                        })
+                    
+                    final_stitched_path = self.stitch_chunks(audio, res_name, parts_data)
 
                     if self.gen_spec_var.get() and final_stitched_path:
                         print(f"{CYAN}>> Generating Spectrogram for full output...{RESET}")
@@ -1300,6 +1397,99 @@ class UTAUResamplerGUI(ctk.CTk):
             self.steps_completed += 1
             progress_value = self.steps_completed / self.total_steps
             self.after(0, lambda v=progress_value: self.progress_bar.set(v))
+    
+    def correct_chunk_pitch(self, chunk_path, target_note):
+        if not os.path.exists(chunk_path):
+            return
+
+        if not target_note or not target_note[-1].isdigit():
+            return
+
+        try:
+            x, fs = sf.read(chunk_path)
+            if x.ndim > 1: 
+                x = np.mean(x, axis=1)
+            x = x.astype(np.float64)
+
+            f0, t = world.harvest(x, fs)
+            valid_f0 = f0[f0 > 0]
+            
+            if len(valid_f0) == 0:
+                return
+                
+            current_hz = np.median(valid_f0)
+
+            notes = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B']
+            clean_note = target_note[:-1].replace('Db', 'C#').replace('Eb', 'D#').replace('Gb', 'F#').replace('Ab', 'G#').replace('Bb', 'A#')
+            octave = int(target_note[-1])
+            target_hz = 440.0 * (2.0 ** ((notes.index(clean_note) + (octave - 4) * 12 - 9) / 12.0))
+
+            if abs(current_hz - target_hz) < 1.0:
+                return
+
+            print(f"    {YELLOW}[SHIFT]{RESET} Correcting {os.path.basename(chunk_path)} ({round(current_hz)}Hz -> {round(target_hz)}Hz)")
+            shift_ratio = target_hz / current_hz
+
+            sp = world.cheaptrick(x, f0, t, fs)  # Extract spectral envelope (formants)
+            ap = world.d4c(x, f0, t, fs)         # Extract aperiodicity (breathiness/noise)
+            shifted_f0 = f0 * shift_ratio        # Shift the pitch curve
+            y_shifted = world.synthesize(shifted_f0, sp, ap, fs) # Rebuild the audio
+            sf.write(chunk_path, y_shifted, fs)
+
+        except Exception as e:
+            print(f"    {RED}[ERROR]{RESET} Failed to correct pitch for {os.path.basename(chunk_path)}: {e}")
+    
+    def probe_resampler(self, res_path, wine_path=None):
+        temp_dir = tempfile.mkdtemp()
+        test_wav = os.path.join(temp_dir, "probe.wav")
+        test_out = os.path.join(temp_dir, "out.wav")
+        
+        try:
+            t = np.linspace(0, 0.5, 22050)
+            data = 0.5 * np.sin(2 * np.pi * 440 * t)
+            sf.write(test_wav, data, 44100, subtype='PCM_16')
+
+            cmd = [res_path, test_wav, test_out, "A4", "100", "", "0", "500", "0", "0", "100", "0", "!120", "AA#500#"]
+            if platform.system() != "Windows" and wine_path:
+                cmd = [wine_path] + cmd
+
+            subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5)
+
+            files = os.listdir(temp_dir)
+            has_prop = any(not f.lower().endswith('.frq') for f in files)
+            has_frq = any(f.lower().endswith('.frq') for f in files)
+
+            if has_prop and not has_frq:
+                return "uses_own_f0"
+            return "uses_frq"
+        except:
+            return "uses_frq"
+        finally:
+            shutil.rmtree(temp_dir)
+
+    def uses_frq(self, res_path, target_note, chunk_wav_path, wine_path=None):
+        res_name = os.path.basename(res_path)
+        if res_name.lower().endswith(('.onnx', '.ckpt')):
+            return target_note
+        
+        self.load_config() 
+        categs = self.config.get("resampler_categ", {"uses_frq": [], "uses_own_f0": []})
+
+        if res_name not in categs["uses_frq"] and res_name not in categs["uses_own_f0"]:
+            if res_name.lower().endswith(('.onnx', '.ckpt')):
+                if res_name not in categs["uses_frq"]:
+                    categs["uses_frq"].append(res_name)
+                    self.save_config()
+            else:
+                print(f"  [PROBE] New resampler: {res_name}. Analyzing...")
+                category = self.probe_resampler(res_path, wine_path)
+                
+                if res_name not in categs[category]:
+                    categs[category].append(res_name)
+                    self.save_config() # This handles the retry-loop and safe dump
+                    print(f"  [PROBE RESULT] {res_name} categorized as: {category}")
+
+        return target_note
 
     def run_resampler(self, t):
         current_os = platform.system()
@@ -1333,7 +1523,7 @@ class UTAUResamplerGUI(ctk.CTk):
                 global_end_ms = (t_end_sec * 1000) / multiplier
                 
                 # Calculate the timeframe this specific chunk represents
-                chunk_start_ms = (t["part_index"] * 30.0 * 1000)
+                chunk_start_ms = (t["part_index"] * self.max_chunk_sec * 1000)
                 chunk_end_ms = chunk_start_ms + current_duration_ms
                 local_offset_ms = max(0, global_start_ms - chunk_start_ms)
                 local_end_ms = min(current_duration_ms, global_end_ms - chunk_start_ms)
@@ -1365,8 +1555,43 @@ class UTAUResamplerGUI(ctk.CTk):
             velocity = str(100)
 
             res_path = t["res_exe"]
+            ext = os.path.splitext(res_path)[1].lower()
+
+            render_pitch = self.uses_frq(
+                res_path=t["res_exe"],
+                target_note=t["pitch"],
+                chunk_wav_path=t["audio_in"],
+                wine_path=self.wine_path_var.get() if hasattr(self, 'wine_path_var') else None
+            )
+
             # arguements
-            if "fader2" in os.path.basename(res_path).lower():
+            if ext in [".onnx"]:
+                print(f"{YELLOW}{BOLD}[EXEC NATIVE] {os.path.basename(res_path)} -> {os.path.basename(t['audio_out'])}{RESET}")
+                try:
+                    chunk_offset_ms = t.get("part_index", 0) * 30000.0
+                    run_onnx_inference(
+                        model_path=res_path,
+                        input_path=processed_input,
+                        output_path=t["audio_out"],
+                        pitch=t["pitch"],
+                        length_ms=float(length),
+                        volume=float(self.volume_var.get() or 100.0),
+                        modulation=float(self.modulation_var.get() or 100.0),
+                        original_path=t.get("original_path", None),
+                        chunk_start_ms=chunk_offset_ms,
+                        speed_multiplier=float(t.get("multiplier", 1.0))
+                    )
+                    print(f"{GREEN}[SUCCESS] Rendered: {os.path.basename(t['audio_out'])}{RESET}")
+                    self.tick_progress()
+                except Exception as e:
+                    print(f"{RED}[ERROR] NATIVE INFERENCE FAILED {os.path.basename(t['audio_out'])}: {e}{RESET}"
+)
+                # Cleanup the temp input file
+                if processed_input != t["audio_in"] and os.path.exists(processed_input):
+                    os.remove(processed_input)
+                return
+
+            elif "fader2" in os.path.basename(res_path).lower():
                 # fader2: <in> <in2> <out> <pitch_hz> <length_ms> <ratio>
                 cmd = [
                     res_path, 
@@ -1383,7 +1608,7 @@ class UTAUResamplerGUI(ctk.CTk):
                     res_path, 
                     processed_input, 
                     t["audio_out"], 
-                    t["pitch"], 
+                    render_pitch, 
                     velocity, 
                     self.flags_var.get() or "", 
                     offset, 
@@ -1459,13 +1684,38 @@ class UTAUResamplerGUI(ctk.CTk):
     
     def stitch_chunks(self, original_audio_path, resampler_name, chunk_results):
         print(f"\033[94m[STITCHING]\033[0m Joining parts for {os.path.basename(original_audio_path)}...")
-        chunk_results.sort(key=lambda f: [int(c) if c.isdigit() else c.lower() for c in re.split('([0-9]+)', f)])
         
+        chunk_results.sort(key=lambda f: [int(c) if c.isdigit() else c.lower() for c in re.split('([0-9]+)', f["path"])])
         combined = AudioSegment.empty()
-        for chunk_file in chunk_results:
+        crossfade_ms = 15
+        
+        for chunk_data in chunk_results:
+            chunk_file = chunk_data["path"]
             if os.path.exists(chunk_file):
                 try:
-                    combined += AudioSegment.from_wav(chunk_file)
+                    seg = AudioSegment.from_wav(chunk_file)
+                    
+                    # TRIM: Slice off the 1000ms armor added in Stage 2
+                    trim_l = chunk_data.get("trim_left", 0)
+                    trim_r = chunk_data.get("trim_right", 0)
+                    
+                    start_idx = trim_l
+                    end_idx = len(seg) - trim_r
+                    
+                    if end_idx <= start_idx: 
+                        end_idx = len(seg)
+                    
+                    trimmed_seg = seg[start_idx:end_idx]
+                    
+                    # CROSSFADE
+                    if len(combined) == 0:
+                        combined = trimmed_seg
+                    else:
+                        if len(trimmed_seg) > crossfade_ms:
+                            combined = combined.append(trimmed_seg, crossfade=crossfade_ms)
+                        else:
+                            combined += trimmed_seg
+                            
                     os.remove(chunk_file)
                 except Exception as e:
                     print(f"  \033[91m[STITCH ERROR]\033[0m Could not read {os.path.basename(chunk_file)}: {e}")
