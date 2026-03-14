@@ -15,6 +15,7 @@ Python GUI toolkit for passing down Resampler arguments (single and batch resamp
 - [x] Fader2.exe support
 - [x] Audio length/duration editor
 - [x] Render long audios in chunks
+- [x] Diffsinger vocoder inferencing (CPU only atm)
 ---
 ## How to use:
 - Install necessary modules in order for the GUI script to run.
